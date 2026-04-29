@@ -81,7 +81,7 @@ export AI_GATEWAY_API_KEY=...
 # 5. Plumbing check (~20 calls, ~$0.50, ~5 minutes).
 python harness/harness.py --pilot --run-id pilot-001
 
-# 6. Full run (~3,560 calls, ~$60, ~2 hours sequential).
+# 6. Full run (2,136 calls = 3 models × 4 baselines × 89 questions × 2 stability runs, ~$60, ~2 hours sequential).
 python harness/harness.py --full --budget-approved --run-id reproduction-001
 
 # 7. Re-render the analysis from results/<run-id>/results.jsonl.
@@ -102,9 +102,9 @@ More detail in [`harness/README.md`](harness/README.md).
 | C — Cube.dev semantic layer | 2.8% | — |
 | D — ClariLayer governed | 42.7% | — |
 
-**H1** (D vs A): +34.1 percentage points, p < 0.001.
+**H1** (D vs B): +34.1 percentage points, paired bootstrap 95% CI [22.8, 44.8]. (D vs A is even larger at +41.4pp.)
 **H2** (Opus 4.7 vs Sonnet 4.5 on Baseline D): -8.4 pp, p = 0.002. The frontier flagship is the *worst* of the three on Baseline D.
-**Stability** (run-1 / run-2 agreement, all baselines): 84.6% on D — well above the 95% target on each model individually.
+**Stability** (run-1 / run-2 agreement, 1,068 paired cells across all baselines): overall 99.1% — well above the 95% target. By model: Opus 99.4%, Sonnet 100%, GPT-5.4 97.8%.
 
 See the white paper for the full discussion, including known caveats (3-model roster, tier-column bug in the governed-context emitter, synthetic warehouse, sample-size bounds).
 
