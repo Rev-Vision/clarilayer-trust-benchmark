@@ -4,13 +4,13 @@
 
 We tested three production-grade LLMs against four context configurations on 89 SaaS-business questions over a deliberately messy 8-table warehouse. The result was unambiguous:
 
-> **Without governance, frontier AI got the canonical, committee-approved answer right just 1–9% of the time** — wrong nine times out of ten, and wrong *differently* in every tool. The "smartest" frontier model in the roster (Claude Opus 4.7) was the worst, not the best, at this task.
+> **Without governance, frontier AI got the canonical, committee-approved answer right just 1–9% of the time** — wrong nine times out of ten, and wrong *differently* in every tool. The most expensive model in the roster (Claude Opus 4.7) finished last, not first, on the governed baseline in this run — a surprising, task-specific result we discuss as exploratory in §H2.
 >
 > **ClariLayer's governed metric layer multiplied accuracy 5× over a documented schema and 33× over bare warehouse access.** When the model still got it wrong, the failures concentrated on the same answer 85% of the time — auditable, predictable, fixable.
 
 This is the benchmark behind the claim that drives ClariLayer: **AI agents hallucinate on business metrics because the context layer is missing**, not because the models aren't capable enough. The fix isn't a smarter model — it's a governed envelope around the metrics the model is being asked to compute.
 
-Run id `v1-2026-04-27`. Total spend $58.58. 2,136 model calls. Fully reproducible from this repo.
+Run id `v1-2026-04-27`. Dataset commit `5b6abec`. Total spend $58.58. 2,136 model calls. Baselines A/B/C reproduce from a public commit; Baseline D additionally requires ClariLayer workspace credentials (see §Reproducibility).
 
 ---
 
@@ -22,7 +22,7 @@ The same 89 natural-language business questions ("How many active users did we h
 |---|---|---|
 | **A — Bare schema** | `CREATE TABLE` DDL only — column names + types | Naive integration: "point an LLM at your warehouse" |
 | **B — Documented schema** | DDL + column comments + table descriptions | A well-documented warehouse — typical dbt project hygiene |
-| **C — Cube.dev semantic layer** | Cube YAML — cubes, dimensions, joins, a single canonical measure per metric (no governance metadata, no versioning, no deprecated variants) | The strongest non-ClariLayer prior art surface |
+| **C — Cube-style semantic layer, single non-governed measure, no approval/version/deprecation metadata** | Cube YAML — cubes, dimensions, joins, a single canonical-looking measure per metric (no governance metadata, no versioning, no deprecated variants) | A plausible semantic-layer surface without governance metadata |
 | **D — ClariLayer governed context** | The structured Metric API output: governed SQL, version, owner, time logic, canonical filters, deprecated-variant reasons | What an AI agent gets when it queries ClariLayer |
 
 Each (model, baseline, question) cell ran twice for stability, against three production-grade models routed via Vercel AI Gateway:
@@ -50,12 +50,12 @@ Per-cell 95% CIs are bootstrap percentile intervals (1,000 resamples at the ques
 | Claude Sonnet 4.5 | 0.0% [0.0, 0.0] | 10.1% [4.5, 16.9] | 2.2% [0.0, 5.6] | **46.1%** [37.1, 56.2] | 14.6% |
 | **Baseline avg** | **1.3%** | **8.6%** | **2.8%** | **42.7%** |  |
 
-![Per-model × baseline accuracy. The non-D bars hug zero across every model; the D bars stand alone above 35%. The "smartest" model (Opus 4.7) underperforms the cheaper Sonnet 4.5 on the governed baseline.](figures/model_baseline_grouped.png)
+![Per-model × baseline accuracy. The non-D bars hug zero across every model; the D bars stand alone above 35%. In this run, the most expensive model (Opus 4.7) underperforms the cheaper Sonnet 4.5 on the governed baseline — see §H2 caveat for why this is exploratory rather than a general claim.](figures/model_baseline_grouped.png)
 
 Two facts jump out and the rest of the report explains them.
 
 1. **Every baseline-D cell is 4-50× higher than every baseline-A/B/C cell** in the same row. Baseline-D's 95% CIs do not overlap with any non-D baseline's CI, anywhere.
-2. **Opus 4.7 — the most expensive model in the roster, and the one with the largest "frontier reasoning" claim — comes in dead last on Baseline D.**
+2. **In this run, Opus 4.7 — the most expensive model in the roster — finishes behind both Sonnet 4.5 and GPT-5.4 on Baseline D.** This is an exploratory, task-specific finding (see §H2 caveat); we are not claiming a general law about frontier reasoning.
 
 ---
 
@@ -67,22 +67,24 @@ Pooling all three models, per-baseline accuracies and confidence intervals:
 |---|---|---|
 | A — Bare schema | 1.3% | [0.0%, 3.2%] |
 | B — Documented schema | 8.6% | [3.7%, 14.0%] |
-| C — Cube semantic layer | 2.8% | [0.0%, 6.7%] |
+| C — Cube-style semantic layer (single non-governed measure) | 2.8% | [0.0%, 6.7%] |
 | D — ClariLayer governed context | **42.7%** | [32.4%, 52.2%] |
 
 **Paired bootstrap on the per-question delta** (D minus the comparator, pooled across models — 1,000 resamples at the question level):
 
-| Comparison | Mean delta | 95% CI | One-sided p |
+| Comparison | Mean delta | 95% CI | Bootstrap directional probability¹ |
 |---|---|---|---|
-| D vs A | +41.4 pp | [31.8, 51.7] | p < 0.001 |
-| D vs B | +34.1 pp | [22.8, 44.8] | p < 0.001 |
-| D vs C | +39.9 pp | [30.1, 50.0] | p < 0.001 |
+| D vs A | +41.4 pp | [31.8, 51.7] | < 0.001 |
+| D vs B | +34.1 pp | [22.8, 44.8] | < 0.001 |
+| D vs C | +39.9 pp | [30.1, 50.0] | < 0.001 |
 
-Baseline D outperforms the *next-best* baseline (B) by **34.1 percentage points**, with all three pairwise comparisons clearing p < 0.001. The gap holds at every individual model and every individual metric cluster.
+> ¹ Throughout this report, "bootstrap directional probability" is the share of bootstrap resamples that crossed zero in the direction opposite to the observed effect. This is a directional stability diagnostic on the resampling distribution, not a frequentist null-hypothesis p-value. As a robustness check, a one-sided sign-flip permutation test on the per-question paired deltas yields directionally significant results for all three D-versus-other comparisons; the H1 effect is large enough that the conclusion does not depend on which test you use.
 
-The pattern holds at every metric individually:
+Baseline D outperforms the *next-best* baseline (B) by **34.1 percentage points**, with all three pairwise comparisons clearing the bootstrap directional-probability threshold of 0.001 (and also passing a sign-flip permutation robustness check).
 
-![Per-metric × baseline pass-rate heatmap. Bright cells (high accuracy) cluster almost entirely in the D column; the A/B/C columns stay dim across nearly every metric.](figures/metric_heatmap.png)
+The pooled lift is broad but uneven: Baseline D is ≥75% accurate on 9/20 metrics, 0% on 8/20 metrics, and the aggregate lift is not driven by any single metric. The 8 zero-D metrics fall into the failure modes documented in the §Limitations / tier-column bug section.
+
+![Per-metric × baseline pass-rate heatmap. The D column is brighter than A/B/C on 9 of 20 metrics; on 8 metrics every baseline (including D) is at 0%, reflecting governed-context emitter gaps catalogued in §Error analysis.](figures/metric_heatmap.png)
 
 ### What "ungoverned" failure actually looks like
 
@@ -95,13 +97,13 @@ When the ungoverned baselines fail, they don't fail at random. The harness clust
 
 These wrong answers are *not* random hallucinations. They're the textbook formula applied to messy data: count the rows in `dim_users` without filtering `is_test`, sum the obvious column without applying the timezone and tier filters the business actually uses. It's the same failure mode an analyst would make on day one — and exactly what governed metric context is engineered to prevent. ClariLayer's governed context for `new_user`, for example, names the canonical filter (`is_test = false`), the authoritative timestamp column, and the timezone — so the model can't fall through to the naive variant.
 
-**The pattern holds even on Baseline D itself.** Across all 89 questions, 84.6% of Baseline D's wrong answers converge on a single value per question — higher than any other baseline:
+**The pattern holds even on Baseline D itself.** Across all 89 questions, Baseline D's residual failures concentrate on a single intuitively-plausible variant per question: **84.6% (unweighted, mean of per-question top-cluster shares); 83.5% (fail-row-weighted across the 53 questions with ≥1 fail).** Both numbers measure the same thing — that residual D failures concentrate on the same wrong answer per question — but the weighted figure controls for the few-fails-per-question denominator. Both come in higher than any other baseline:
 
 | Baseline | FAIL count | Top-cluster share among failed questions |
 |---|---:|---:|
 | A — bare schema | 525 | 57.9% |
 | B — documented schema | 485 | 48.7% |
-| C — Cube semantic layer | 519 | 82.2% |
+| C — Cube-style semantic layer (single non-governed measure) | 519 | 82.2% |
 | **D — ClariLayer governed** | **279** | **84.6%** |
 
 When even a governed-context model can't get the right answer, it's still landing on one specific intuitively-plausible variant — exactly the wrong answer governance is designed to rule out. Volume drops by 50% under governance *and* the residual failures concentrate on the ambiguity governance addresses. Both signals point the same way.
@@ -112,9 +114,11 @@ A more dramatic example from the dataset itself: the deprecated v2 governed vers
 
 ---
 
-## H2 — Frontier reasoning hurts, not helps
+## H2 — In this run, the largest model did not win
 
-This is the unexpected finding. On Baseline D specifically:
+H2 is exploratory and task-specific. With three models on one synthetic dataset of 89 scalar SQL questions, this finding should not be read as a general ranking of model families or a claim about frontier reasoning. We report it because the direction surprised us and is reproducible from the published JSONL; it is not a confirmatory result.
+
+On Baseline D specifically:
 
 | Model | Baseline D accuracy | 95% CI |
 |---|---|---|
@@ -122,9 +126,11 @@ This is the unexpected finding. On Baseline D specifically:
 | GPT-5.4 | 44.4% | [33.7%, 54.5%] |
 | Claude Sonnet 4.5 | **46.1%** | [37.1%, 56.2%] |
 
-**Paired bootstrap, Opus 4.7 minus Sonnet 4.5 on Baseline D:** mean **−8.4 pp**, 95% CI [−15.2, −2.8], one-sided p = 0.002 (testing whether Opus < Sonnet).
+**Paired bootstrap, Opus 4.7 minus Sonnet 4.5 on Baseline D:** mean **−8.4 pp**, 95% CI [−15.2, −2.8], bootstrap directional probability = 0.002 (share of resamples ≥ 0). As a robustness check, a one-sided sign-flip permutation test on the per-question paired deltas yields p ≈ 0.011 (unadjusted).
 
-Opus is not statistically tied with Sonnet — it is **measurably worse** on the governed baseline. Per-metric breakdown of the Opus-minus-Sonnet delta on D, restricted to metrics with |Δ| ≥ 10 pp:
+This pairwise contrast is one of three possible Baseline-D model comparisons (Opus−Sonnet, Opus−GPT5.4, GPT5.4−Sonnet). Under family-wise Holm adjustment across the three comparisons, the Opus−Sonnet contrast remains directionally significant but should be read as **exploratory rather than confirmatory** — H2 is a single-dataset, single-task observation, and the multi-comparison exposure further weakens any general claim.
+
+Within this run, the observed direction is consistent: Opus is the lowest-scoring of the three models on Baseline D, and the gap to Sonnet exceeds the bootstrap CI floor. We are reporting the direction and the mechanism we traced, not asserting a general ranking. Per-metric breakdown of the Opus-minus-Sonnet delta on D, restricted to metrics with |Δ| ≥ 10 pp:
 
 | Metric | Sonnet on D | Opus on D | Δ (Opus − Sonnet) |
 |---|---|---|---|
@@ -151,13 +157,13 @@ WHERE u.created_at >= TIMESTAMP '2026-03-01 00:00:00'
 
 The 7-8 hour PT-to-UTC shift drops a thin slice of records that signed up in the first hours of March PT (still February UTC) and pulls in some that signed up in the last hours of March UTC. The relative difference is small — under 2% — but past the 0.1% tolerance the rubric uses. The same pattern produces the deltas on `pipeline_coverage` and `cac`.
 
-On metrics where the governed context fully specifies the SQL shape — `churn_rate`, `net_retention`, `gross_retention`, `gross_margin` — both models tie at 100%. The frontier model's extra reasoning only shows up where the governed context leaves *any* shape decisions to the model. And when it shows up, it makes the model worse, because the over-reasoned answer is no longer the answer the business actually computes.
+On metrics where the governed context fully specifies the SQL shape — `churn_rate`, `net_retention`, `gross_retention`, `gross_margin` — both models tie at 100%. In this run, Opus's extra inference only showed up where the governed context left *any* shape decisions to the model — and on those cells the over-reasoned answer was no longer the answer the business actually computes. Whether this generalizes beyond the three models, 89 questions, and single dataset tested here is an open question.
 
 ### The cost-vs-accuracy story
 
-Opus list pricing is roughly 5× Sonnet's, per token. On these tasks, Opus delivered **−8.4 pp less** accuracy on the governed baseline. **Spending 5× on a frontier model with this benchmark's task profile buys negative accuracy.** Spending the same budget on closing the context gap instead — the difference between Baseline B and Baseline D — buys roughly +34 percentage points.
+Opus list pricing is roughly 5× Sonnet's, per token. **On this benchmark's specific task profile — single-turn scalar SQL on 89 pre-registered metric questions — Opus delivered −8.4 pp less accuracy than Sonnet on the governed baseline.** Spending the same budget on closing the context gap instead — the difference between Baseline B and Baseline D — buys roughly +34 percentage points on the same task profile.
 
-For BI leaders and engineering managers evaluating "should we upgrade our agent's model tier or invest in metric governance?", the math is one-sided.
+For BI leaders and engineering managers evaluating "should we upgrade our agent's model tier or invest in metric governance?" against this kind of single-turn scalar-answer workload, the math points one way. Whether the same trade-off holds for multi-turn agents, retrieval-augmented workflows, or chart/report generation is out of scope for v1.
 
 ---
 
@@ -193,7 +199,7 @@ Without this block, every model in our roster — frontier and otherwise — con
 
 ## Reproducibility
 
-Everything in this report is reproducible from a public commit:
+Everything in this report is reproducible from a public commit, with one caveat: reproducibility profiles differ by baseline. Baselines A, B, and C reproduce from this repo plus a Vercel AI Gateway API key — no other infrastructure required. **Baseline D requires a ClariLayer workspace** with a `metrics:read` API key (`BENCHMARK_API_KEY` + `BENCHMARK_API_BASE_URL`) so the harness can hit the live Canonical Metric API. We publish the seeding script and the canonical run output for D, but exact live-D reproduction against your own warehouse requires ClariLayer credentials. Design partners receive workspace access as part of the benchmark-on-your-warehouse engagement (§What we want next).
 
 - **Repository:** `github.com/Rev-Vision/clarilayer-trust-benchmark` (this repo). Companion blog post: https://clarilayer.com/blog/post-trust-benchmark-v1
 - **Dataset:** synthetic warehouse generator + 20 metric YAML files + 89 questions with ground-truth SQL and expected values, all under `dataset/` and `harness/seed_warehouse.py`.
@@ -227,13 +233,29 @@ Total cost for the full run is approximately $60. Wall time is about 2 hours seq
 
 We are publishing v1 with the following caveats. None of them changes the headline finding (governed context wins by 30-45 pp). Each is named here, and each is on the v1.1 fix list.
 
+### 42.7% is a lift signal, not a deployment threshold
+
+The benchmark establishes **lift from governed context, not sufficient autonomous accuracy**. A 42.7% v1 score is not a deployment threshold for unsupervised AI-driven BI. Production deployment of governed-context AI for metric answering should still include human review, especially for the failure modes catalogued in §Error analysis (the tier-column emitter gap and the residual cluster on intuitively-plausible variants). The headline claim is "governed context multiplies accuracy 5×–33× over ungoverned baselines," not "ClariLayer-augmented agents are accurate enough to run unattended."
+
+### Measured construct
+
+The outcome variable is scalar business-correctness of model-generated DuckDB SQL for pre-registered metric questions: PASS if and only if the SQL executes and the result matches the ground-truth value within ≤0.1% relative tolerance for floats / exact match for ints. The benchmark does NOT measure: multi-row table outputs, model explanations or rationales, chart generation, multi-turn agent workflows, clarification-question quality, retrieval-augmented tool use, or accuracy on questions outside the pre-registered 89-question battery. Lift on this construct should be read as evidence about *single-turn metric-definition disambiguation*, not about end-to-end BI agent capability.
+
 ### Three-model roster, not five
 
 The benchmark spec called for a five-model roster (frontier: Opus 4.7, GPT-5.4, Gemini 3 Pro Preview; production: Sonnet 4.5, GPT-5 standard / GPT-4o). v1 ships with three: Opus 4.7, GPT-5.4, Sonnet 4.5.
 
 **Gemini 3 Pro Preview** was dropped mid-run for verbose-output truncation. The model emitted long reasoning prose that ran past the harness's 1500 max-output-tokens cap, leaving SQL blocks unclosed and unparseable. After regex-relaxing the SQL extractor and tightening the system prompt, the Gemini error rate stayed above 60%. **GPT-5 standard** failed in the same way: 12 of 14 calls in early testing returned no SQL because the model spent its entire budget on reasoning prose.
 
-Forensics for both are preserved (`results.gemini-dropped.jsonl`, 396 rows; `results.gpt5-dropped.jsonl`, 23 rows). The v1.1 plan: bump max-output-tokens, retry both models, and consider substituting `gpt-4o` for the production GPT-5 slot if GPT-5 standard's verbose-prose failure mode persists.
+The full attrition picture for the run:
+
+| Model attempted | Calls attempted | Exclusion rule | Rows preserved (private repo only) | Included in headline? |
+|-----------------|----------------:|----------------|------------------------------------:|:---------------------:|
+| Gemini 3 Pro Preview | 396 | Verbose-output truncation > max-output-tokens | 396 (`results.gemini-dropped.jsonl`) | No |
+| GPT-5 standard | 23 | Same truncation failure mode | 23 (`results.gpt5-dropped.jsonl`) | No |
+| Pre-fix `extract_sql` | 98 | Truncated-fence regression baseline | 98 (`results.pre-fix.jsonl`) | No |
+
+These dropped JSONL artifacts live in the private build repo and are available on request. The headline numbers (1.3 / 8.6 / 2.8 / 42.7) are computed from `results.jsonl` alone — the canonical 2,136-row dataset for the three included models. The v1.1 plan: bump max-output-tokens, retry both models, and consider substituting `gpt-4o` for the production GPT-5 slot if GPT-5 standard's verbose-prose failure mode persists.
 
 ### Governed-context emitter has a tier-column bug
 
@@ -245,11 +267,19 @@ Models read the segmentation reference, hallucinate `c.tier`, and DuckDB rejects
 
 The warehouse is generated from a deterministic seed designed to simulate real-company messiness — mixed timezones, naming inconsistency, orphan rows, soft-delete inconsistency, near-duplicate dim rows, currency mixing. Real Design Partner warehouses likely carry additional vectors of messiness our 7-layer recipe doesn't reproduce (e.g., schema migrations mid-history, vendor-specific JSONB structures, multi-tenant column-level access controls).
 
-The v1 benchmark probably *under-states* the lift from governance on real data; the benchmark spec includes a "run it on your warehouse" private-deliverable lane (§6.2 of the spec) for partners who want their own number.
+Whether real-world lift is larger or smaller than the v1 synthetic-data lift is an empirical question; partner runs against real warehouses (the §What we want next deliverable) are needed to estimate it. We don't claim the synthetic data understates real lift — that would itself be an unsubstantiated claim. The benchmark spec includes a "run it on your warehouse" private-deliverable lane (§6.2 of the spec) for partners who want their own number.
 
 ### Sample size
 
 89 questions × 2 stability runs is comfortable for the H1 effect — a ~30 pp gap is well above sampling noise — but it limits per-metric resolution to 4-5 questions per cell. Cells with a 0/4 or 4/4 result therefore have wide confidence intervals. We're confident in the headline matrix; we're less confident in the per-metric ranking of metrics that scored at the extremes.
+
+### Baseline D prompt is materially longer than A/B/C
+
+Baseline D's prompt is materially longer than A/B/C and includes the canonical SQL template among other governance metadata. This is by design — D tests the value of supplying the approved metric record, not the model's ability to derive it from sparse context. A reader who wants to disentangle "context length" from "context content" can run the harness with truncated D contexts; v2 plans include this ablation (D-minus-template, D-minus-deprecation-history, etc.) so the lift can be attributed to specific governance fields rather than to context size in aggregate.
+
+### Vendor-authored benchmark
+
+This benchmark was designed, executed, scored, and written up by ClariLayer. We designed the synthetic warehouse, authored the question set, defined the ground-truth SQL, implemented all four baselines (including the one whose product we sell), and chose the framing of the results. No external panel reviewed v1 before publication. We mitigate this by publishing the questions, ground-truth SQL, harness, raw per-call JSONL, and limitations openly so any reader can re-execute and re-score against their own definitions or judgments. Independent partner runs against real warehouses (see §What we want next) are part of how we plan to extend the evidence base beyond this internally-authored v1.
 
 ---
 
