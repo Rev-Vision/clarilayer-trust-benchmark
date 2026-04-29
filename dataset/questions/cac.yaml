@@ -1,0 +1,111 @@
+# Test questions for cac.
+# Governed variant: B — $300K monthly S+M placeholder ÷ new paying
+# customers in period (signup in period + active paid sub).
+# Note: governed SQL uses 300000.0 as a literal numerator regardless of
+# the period length (the metric YAML's text says 'monthly' but the
+# variant SQL is fixed-literal). All variant SQL formulas in the YAML
+# use the same fixed 300000.0 numerator, so the metric is fully
+# self-consistent. Comparing variants tests denominator choice.
+
+- id: cac-001
+  metric_key: cac
+  governed_variant: B
+  question: "What was our customer acquisition cost in Q1 2026?"
+  expected_sql: |
+    WITH new_paying_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2026-01-01'
+        AND c.signup_date < DATE '2026-04-01'
+        AND c.is_test = false
+        AND s.status = 'active'
+        AND s.mrr > 0
+    )
+    SELECT 300000.0 / NULLIF(n, 0) AS cac
+    FROM new_paying_customers
+  expected_value: 1562.5
+  acceptable_alternatives:
+    - "Equivalent SQL with a paying-customer denominator."
+  unacceptable_variants:
+    - "A — total spend ÷ all signups (deflates CAC; missing test/paid filter)"
+    - "C — marketing-only numerator ($100K instead of $300K)"
+    - "D — fully-loaded numerator ($400K instead of $300K)"
+    - "E — per-customer cohort allocation methodology (different output shape)"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: cac-002
+  metric_key: cac
+  governed_variant: B
+  question: "What was our CAC for fiscal year 2025?"
+  expected_sql: |
+    WITH new_paying_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2025-01-01'
+        AND c.signup_date < DATE '2026-01-01'
+        AND c.is_test = false
+        AND s.status = 'active'
+        AND s.mrr > 0
+    )
+    SELECT 300000.0 / NULLIF(n, 0) AS cac
+    FROM new_paying_customers
+  expected_value: 78.74
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: cac-003
+  metric_key: cac
+  governed_variant: B
+  question: "What was our CAC in March 2026?"
+  expected_sql: |
+    WITH new_paying_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2026-03-01'
+        AND c.signup_date < DATE '2026-04-01'
+        AND c.is_test = false
+        AND s.status = 'active'
+        AND s.mrr > 0
+    )
+    SELECT 300000.0 / NULLIF(n, 0) AS cac
+    FROM new_paying_customers
+  expected_value: 11538.46
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on March 2026 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: easy
+  ambiguity_axis: filter
+
+- id: cac-004
+  metric_key: cac
+  governed_variant: B
+  question: "What was our CAC in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH new_paying_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2025-10-01'
+        AND c.signup_date < DATE '2026-01-01'
+        AND c.is_test = false
+        AND s.status = 'active'
+        AND s.mrr > 0
+    )
+    SELECT 300000.0 / NULLIF(n, 0) AS cac
+    FROM new_paying_customers
+  expected_value: 501.67
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic

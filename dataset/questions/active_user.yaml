@@ -1,0 +1,175 @@
+# Test questions for active_user.
+# Governed variant: C — distinct users with non-stale last_active_at in
+# window AND on a paying-customer (active subscription with mrr > 0)
+# AND non-test customer AND not soft-deleted. The mrr > 0 predicate
+# excludes refund-row subs whose negative mrr can otherwise carry an
+# 'active' status from the billing system.
+
+- id: active_user-001
+  metric_key: active_user
+  governed_variant: C
+  question: "How many active users did we have in March 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= TIMESTAMP '2026-03-01'
+      AND u.last_active_at < TIMESTAMP '2026-04-01'
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < TIMESTAMP '2026-04-01'
+      AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-03-01')
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 32931
+  acceptable_alternatives:
+    - "Equivalent SQL with the same last_active_at + paying-customer (mrr > 0) + non-test + non-deleted filters."
+  unacceptable_variants:
+    - "A — last_active_at only, no subscription / test / deletion filters"
+    - "B — event-trigger based ('login' or 'action_performed'); excludes broader pulse signals"
+    - "D — session-based heuristic; fragile against TZ-mixed timestamps"
+    - "E — engaged threshold (≥5 events); produces conservative under-count"
+    - "Variants without mrr > 0 — overcount users tied to refund-row subs"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: active_user-002
+  metric_key: active_user
+  governed_variant: C
+  question: "How many active users did we have in February 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= TIMESTAMP '2026-02-01'
+      AND u.last_active_at < TIMESTAMP '2026-03-01'
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < TIMESTAMP '2026-03-01'
+      AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-02-01')
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 12104
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Feb 2026 window."
+  unacceptable_variants:
+    - "Variants A/B/D/E."
+  difficulty: easy
+  ambiguity_axis: time_logic
+
+- id: active_user-003
+  metric_key: active_user
+  governed_variant: C
+  question: "How many active users did we have in Q1 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= TIMESTAMP '2026-01-01'
+      AND u.last_active_at < TIMESTAMP '2026-04-01'
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < TIMESTAMP '2026-04-01'
+      AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-01-01')
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 56218
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q1 2026 window."
+  unacceptable_variants:
+    - "Variants A/B/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: active_user-004
+  metric_key: active_user
+  governed_variant: C
+  question: "What was the month-over-month change in active users from February 2026 to March 2026?"
+  expected_sql: |
+    WITH mar AS (
+      SELECT COUNT(DISTINCT u.user_id) AS au
+      FROM dim_users u
+      JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.last_active_at >= TIMESTAMP '2026-03-01'
+        AND u.last_active_at < TIMESTAMP '2026-04-01'
+        AND s.status = 'active' AND s.mrr > 0 AND s.started_at < TIMESTAMP '2026-04-01'
+        AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-03-01')
+        AND c.is_test = false AND u.deleted_at IS NULL
+    ),
+    feb AS (
+      SELECT COUNT(DISTINCT u.user_id) AS au
+      FROM dim_users u
+      JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.last_active_at >= TIMESTAMP '2026-02-01'
+        AND u.last_active_at < TIMESTAMP '2026-03-01'
+        AND s.status = 'active' AND s.mrr > 0 AND s.started_at < TIMESTAMP '2026-03-01'
+        AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-02-01')
+        AND c.is_test = false AND u.deleted_at IS NULL
+    )
+    SELECT mar.au - feb.au AS mom_change FROM mar, feb
+  expected_value: 20827
+  acceptable_alternatives:
+    - "Two governed-variant queries with the difference computed in any equivalent shape."
+  unacceptable_variants:
+    - "MoM computed using variant A or B (different active definitions yield different absolute numbers and so a different delta)."
+  difficulty: hard
+  ambiguity_axis: trend
+
+- id: active_user-005
+  metric_key: active_user
+  governed_variant: C
+  question: "How many active users did we have in Q4 of fiscal year 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= TIMESTAMP '2025-10-01'
+      AND u.last_active_at < TIMESTAMP '2026-01-01'
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < TIMESTAMP '2026-01-01'
+      AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2025-10-01')
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 6208
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/B/D/E."
+    - "Off-by-fiscal-year window (using e.g. April-June if mistaking the fiscal calendar)."
+  difficulty: medium
+  ambiguity_axis: filter
+
+- id: active_user-006
+  metric_key: active_user
+  governed_variant: C
+  question: "How many enterprise-tier active users did we have in March 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= TIMESTAMP '2026-03-01'
+      AND u.last_active_at < TIMESTAMP '2026-04-01'
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < TIMESTAMP '2026-04-01'
+      AND (s.ended_at IS NULL OR s.ended_at >= TIMESTAMP '2026-03-01')
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+      AND c.plan_tier = 'enterprise'
+  expected_value: 17356
+  acceptable_alternatives:
+    - "Equivalent SQL with the customer-grain dim_customers.plan_tier filter applied to the governed Active User definition."
+    - "GROUP BY plan_tier breakdown whose enterprise row matches expected_value."
+  unacceptable_variants:
+    - "Grouping by fct_subscriptions.plan (per-subscription product line) instead of dim_customers.plan_tier (customer-level tier)."
+    - "Variants A/B/D/E."
+  difficulty: medium
+  ambiguity_axis: grouping

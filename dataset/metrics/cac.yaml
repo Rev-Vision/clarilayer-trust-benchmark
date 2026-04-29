@@ -1,0 +1,204 @@
+metric_key: cac
+name: Customer Acquisition Cost (CAC)
+description: |
+  The average cost to acquire a new paying customer. The
+  numerator (sales + marketing spend) is the most disputed
+  part: blended (S+M total) vs paid-only (paid marketing
+  channels) vs fully-loaded (S+M plus tooling and overhead).
+  The denominator (new customers) has its own ambiguity —
+  same as the Customer metric — paying vs any signup, with
+  vs without test-account exclusion.
+
+  WARNING for D3 ground-truth authors: this metric requires
+  a marketing/sales spend source that is NOT in the 6-table
+  spec §3.3.1 schema. The governed definition uses a
+  hardcoded $300K/month placeholder for S+M spend. When D1
+  finalizes its schema, this metric may need a proxy table
+  (e.g., a `fct_spend` table) or this metric's ground-truth
+  SQL has to bake the constant inline.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Numerator: assumed S+M spend in period (placeholder
+    -- constant — see note above).
+    -- Denominator: distinct new paying customers acquired
+    -- in the period (governed Customer definition for
+    -- newly-acquired customers).
+    WITH new_paying_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= ${period_start}
+        AND c.signup_date < ${period_end}
+        AND c.is_test = false
+        AND s.status = 'active'
+        AND s.mrr > 0
+    )
+    SELECT 300000.0 / NULLIF(n, 0) AS cac
+    FROM new_paying_customers
+  plain_language_spec: |
+    Total Sales + Marketing spend in the period (assumed
+    $300K/month placeholder) divided by the number of
+    distinct new paying customers acquired in that period.
+    "Acquired" means signup_date in the period AND has at
+    least one currently-active paid subscription.
+
+governance_metadata:
+  version: "v1"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-03-22"
+  deprecated_versions: []
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "quarterly"
+  canonical_filters:
+    - "Numerator: total Sales + Marketing spend (placeholder constant in this benchmark)"
+    - "Denominator: new paying customers (signup in period + active paid subscription)"
+    - "Exclude test customers from denominator"
+
+variants:
+  - id: A
+    label: "Total spend ÷ all new signups (any subscription state)"
+    sql_template: |
+      WITH new_signups AS (
+        SELECT COUNT(*) AS n
+        FROM dim_customers
+        WHERE signup_date >= ${period_start}
+          AND signup_date < ${period_end}
+      )
+      SELECT 300000.0 / NULLIF(n, 0) AS cac
+      FROM new_signups
+    why_someone_might_pick_this: |
+      The simplest CAC: spend over signups. Used in
+      growth/marketing dashboards focused on top-of-funnel
+      cost. Common when the "did they pay?" filter feels
+      out of scope.
+    why_governed_disagrees: |
+      Counts free-tier and trialing customers in the
+      denominator, which deflates CAC. Includes test
+      customers. The governed CAC reflects paid-customer
+      acquisition cost, which is materially higher.
+
+  - id: B
+    label: "Total spend ÷ new paying customers (GOVERNED)"
+    sql_template: |
+      WITH new_paying_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${period_start}
+          AND c.signup_date < ${period_end}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT 300000.0 / NULLIF(n, 0) AS cac
+      FROM new_paying_customers
+    why_someone_might_pick_this: |
+      An analyst with the standard SaaS CAC convention.
+      Paying-customer denominator with test exclusion.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Marketing-only CAC (excludes Sales spend)"
+    sql_template: |
+      WITH new_paying_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${period_start}
+          AND c.signup_date < ${period_end}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT 100000.0 / NULLIF(n, 0) AS cac
+      FROM new_paying_customers
+    why_someone_might_pick_this: |
+      A marketing-org definition of CAC that isolates
+      paid-channel spend (~$100K/month) from sales-team
+      compensation. Useful for evaluating marketing
+      channel efficiency in isolation.
+    why_governed_disagrees: |
+      Different numerator. The governed CAC is blended
+      (S+M); marketing-only CAC is a sub-metric that
+      should not be reported as CAC without qualifier.
+      Returns ~3× lower than governed.
+
+  - id: D
+    label: "Fully-loaded CAC (S+M plus tooling and overhead)"
+    sql_template: |
+      WITH new_paying_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${period_start}
+          AND c.signup_date < ${period_end}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT 400000.0 / NULLIF(n, 0) AS cac
+      FROM new_paying_customers
+    why_someone_might_pick_this: |
+      A finance-aligned CAC that includes tooling
+      (Salesforce, Marketo), agency fees, and allocated
+      overhead. ~$400K/month. Some companies' "true CAC"
+      number — used for board-level efficiency
+      narratives.
+    why_governed_disagrees: |
+      The governed CAC convention is direct S+M only,
+      not fully-loaded. Mixing the two distorts comparison
+      against industry benchmarks (most published CAC
+      figures are direct, not fully-loaded).
+
+  - id: E
+    label: "Customer-cohort CAC (spend at signup time, not period spend)"
+    sql_template: |
+      WITH cohort AS (
+        SELECT c.customer_id, c.signup_date
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${period_start}
+          AND c.signup_date < ${period_end}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT
+        AVG(300000.0 * 30.44 / EXTRACT(DAY FROM
+          DATE_TRUNC('month', signup_date) + INTERVAL '1 month'
+            - DATE_TRUNC('month', signup_date)))
+          AS cac
+      FROM cohort
+    why_someone_might_pick_this: |
+      An analyst computing CAC at the per-customer cohort
+      level, allocating monthly spend to each acquired
+      customer. More refined; defensible for
+      cohort-economics analysis.
+    why_governed_disagrees: |
+      Mixes time bases (per-customer instantaneous
+      allocation vs period-level average) and produces a
+      number that varies based on intra-month signup
+      distribution. The governed CAC uses the simpler
+      period-level ratio.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our CAC?", "CAC by
+  acquisition channel" (requires marketing-channel
+  attribution data not in the 6-table spec — variant
+  ambiguity is mostly about industry segment),
+  "Trailing 4-quarter CAC."
+notes_for_context_blocks: |
+  This metric depends on a S+M spend source not in the 6
+  spec tables. Baseline A/B/C should expose the same
+  hardcoded $300K/month constant or signal that the
+  spend source is unavailable. Baseline C's Cube
+  definition usually has a `total_spend` measure
+  hardcoded — same as governed.

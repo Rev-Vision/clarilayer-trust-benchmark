@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: "ClariLayer Trust Benchmark v1"
+message: "If you reference this benchmark, please cite it using the metadata below."
+type: dataset
+authors:
+  - family-names: Hui
+    given-names: Kyle
+    affiliation: ClariLayer
+date-released: 2026-04-27
+version: "1.0.0"
+url: "https://github.com/Rev-Vision/clarilayer-trust-benchmark"
+repository-code: "https://github.com/Rev-Vision/clarilayer-trust-benchmark"
+keywords:
+  - llm-evaluation
+  - text-to-sql
+  - semantic-layer
+  - enterprise-ai
+  - benchmark
+license: Apache-2.0

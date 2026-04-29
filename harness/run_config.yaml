@@ -1,0 +1,99 @@
+# ClariLayer Trust Benchmark — Harness run configuration
+#
+# Used by `harness.py` when launched without an explicit override path.
+# `--pilot` swaps the active config to the `pilot` block below; `--full`
+# uses the top-level model roster.
+#
+# ---------------------------------------------------------------------------
+# Model IDs
+# ---------------------------------------------------------------------------
+# Vercel AI Gateway routes by namespaced model ID (provider/model-slug). The
+# concrete IDs below were the *most-current public IDs* at the time of the
+# v1 run (2026-04-26) — verify against `GET https://ai-gateway.vercel.sh/v1/ai/models`
+# (or the gateway's web "Models" tab) before launching the full run.
+#
+# When the gateway exposes a successor (e.g. opus-4-7 supersedes opus-4-5),
+# update the `id` here AND in `pilot.models` below. The harness's
+# `--list-models` flag prints what the gateway currently advertises so you
+# can refresh this file before re-running.
+#
+# Fallback strategy when an ID is not routable:
+#   1. Try the exact ID below.
+#   2. On 404 / "model not found", try the family alias from `fallbacks`.
+#   3. If that also 404s, abort the run with a clear error — refresh this
+#      file before proceeding.
+#
+# Pricing for cost-estimate output is hardcoded in harness.py (PRICING dict)
+# keyed by canonical family slug. Update both files together.
+
+models:
+  frontier:
+    - id: anthropic/claude-opus-4.7
+      label: "Claude Opus 4.7 (1M)"
+      family: claude-opus-4
+      fallbacks:
+        - anthropic/claude-opus-4.5
+        - anthropic/claude-opus-4
+    - id: openai/gpt-5.4
+      label: "GPT-5.4"
+      family: gpt-5
+      fallbacks:
+        - openai/gpt-5-pro
+        - openai/gpt-5
+    # Gemini 3 Pro Preview dropped from v1 run after consistently hitting
+    # the max_output_tokens cap mid-SQL (verbose output even with sharp
+    # system prompt). Will be re-added in v1.1 with a higher token ceiling
+    # or substituted with `google/gemini-3-flash` once tested.
+    # - id: google/gemini-3-pro-preview
+    #   label: "Gemini 3 Pro"
+    #   family: gemini-3-pro
+  production:
+    - id: anthropic/claude-sonnet-4.5
+      label: "Claude Sonnet 4.5"
+      family: claude-sonnet-4
+      fallbacks:
+        - anthropic/claude-sonnet-4-20250514
+    # GPT-5 (standard) dropped from v1 run after producing 1472-token
+    # reasoning outputs that contained no SQL fence at all (12/14 calls
+    # returned "empty SQL"). Same family of issue as Gemini 3 Pro Preview
+    # — the model favors verbose explanation over the requested fenced
+    # SQL form. v1.1 will retry with `openai/gpt-4o` or `openai/gpt-5-chat`
+    # once tested.
+    # - id: openai/gpt-5
+    #   label: "GPT-5"
+    #   family: gpt-5
+    #   fallbacks:
+    #     - openai/gpt-4o
+
+baselines: [a, b, c, d]
+
+stability_runs: 2
+
+# Per-call request shape sent to the gateway.
+request:
+  temperature: 0.0
+  max_output_tokens: 1500   # generous ceiling for a single SQL statement
+  timeout_seconds: 90
+  retries: 3
+  retry_initial_seconds: 2
+  retry_max_seconds: 30
+
+# Pilot mode (overridden by --pilot CLI flag). 1 model × 4 baselines × 5
+# representative questions × 1 stability run = 20 calls. Cost ceiling ~$10-30
+# given the harness's draft pricing.
+pilot:
+  models:
+    - id: anthropic/claude-opus-4.7
+      label: "Claude Opus 4.7 (1M)"
+      family: claude-opus-4
+      fallbacks:
+        - anthropic/claude-opus-4.5
+        - anthropic/claude-opus-4
+  baselines: [a, b, c, d]
+  question_subset:
+    - arr-001
+    - churn_rate-001
+    - gross_margin-001
+    - active_user-001
+    - qualified_lead-001
+  stability_runs: 1

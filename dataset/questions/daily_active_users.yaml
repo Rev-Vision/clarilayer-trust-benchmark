@@ -1,0 +1,128 @@
+# Test questions for daily_active_users (DAU).
+# Governed variant: C — last_active_at normalized to America/Los_Angeles
+# (workspace TZ), bucketed to a single day, gated on paying-customer
+# subscription, non-test, non-deleted.
+
+- id: daily_active_users-001
+  metric_key: daily_active_users
+  governed_variant: C
+  question: "What was our daily active user count on March 15, 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS dau
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        >= TIMESTAMP '2026-03-15'
+      AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        < TIMESTAMP '2026-03-15' + INTERVAL '1 day'
+      AND EXISTS (
+        SELECT 1 FROM fct_subscriptions s
+        WHERE s.customer_id = u.customer_id
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at <= DATE '2026-03-15'
+          AND (s.ended_at IS NULL OR s.ended_at > DATE '2026-03-15')
+      )
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 798
+  acceptable_alternatives:
+    - "Equivalent SQL with last_active_at normalized to America/Los_Angeles plus governed paying-customer-subscription gate."
+  unacceptable_variants:
+    - "A — naive UTC bucket (off by 5-8% in this warehouse)"
+    - "B — event-trigger DAU (TZ-mixed timestamps; orphan inflation)"
+    - "D — DATE_TRUNC on UTC (wrong target timezone, ~7-8h drift)"
+    - "E — 24-hour rolling instead of calendar day"
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: daily_active_users-002
+  metric_key: daily_active_users
+  governed_variant: C
+  question: "How many daily active users did we have on March 1, 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS dau
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        >= TIMESTAMP '2026-03-01'
+      AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        < TIMESTAMP '2026-03-01' + INTERVAL '1 day'
+      AND EXISTS (
+        SELECT 1 FROM fct_subscriptions s
+        WHERE s.customer_id = u.customer_id
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at <= DATE '2026-03-01'
+          AND (s.ended_at IS NULL OR s.ended_at > DATE '2026-03-01')
+      )
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 559
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on 2026-03-01 day."
+  unacceptable_variants:
+    - "Variants A/B/D/E."
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: daily_active_users-003
+  metric_key: daily_active_users
+  governed_variant: C
+  question: "How many daily active users did we have on March 31, 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS dau
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        >= TIMESTAMP '2026-03-31'
+      AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        < TIMESTAMP '2026-03-31' + INTERVAL '1 day'
+      AND EXISTS (
+        SELECT 1 FROM fct_subscriptions s
+        WHERE s.customer_id = u.customer_id
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at <= DATE '2026-03-31'
+          AND (s.ended_at IS NULL OR s.ended_at > DATE '2026-03-31')
+      )
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 1878
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on 2026-03-31 day."
+  unacceptable_variants:
+    - "Variant A — naive UTC bucketing produces a different number depending on TZ-mix"
+    - "Variants B/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: daily_active_users-004
+  metric_key: daily_active_users
+  governed_variant: C
+  question: "How many daily active users did we have on Monday, March 9, 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS dau
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        >= TIMESTAMP '2026-03-09'
+      AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        < TIMESTAMP '2026-03-09' + INTERVAL '1 day'
+      AND EXISTS (
+        SELECT 1 FROM fct_subscriptions s
+        WHERE s.customer_id = u.customer_id
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at <= DATE '2026-03-09'
+          AND (s.ended_at IS NULL OR s.ended_at > DATE '2026-03-09')
+      )
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 668
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on 2026-03-09 day."
+  unacceptable_variants:
+    - "Variants A/B/D/E."
+  difficulty: hard
+  ambiguity_axis: filter

@@ -1,0 +1,262 @@
+metric_key: pipeline_coverage
+name: Pipeline Coverage
+description: |
+  The ratio of pipeline value to revenue/bookings target
+  for the period. Sales-leadership metric measuring whether
+  there's enough open pipeline to hit a goal. Variant
+  ambiguity centers on what counts as pipeline (all stages,
+  qualified-only, late-stage-only) and what target you
+  divide by (booking quota, ARR target, revenue target).
+
+  WARNING for D3 ground-truth authors: pipeline data is
+  not in the 6-table spec §3.3.1 schema. Variants approximate
+  using fct_events sales-stage signals + a hardcoded $5M
+  quarterly target placeholder. When D1 finalizes its schema,
+  this metric may need a proxy table or D3 must use the
+  inferred-from-events shape.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Pipeline value = sum of open opportunity deal values.
+    -- Open = `opp_created` fired but no `opp_won`/`opp_lost`/
+    -- `opp_no_decision` follow-up before period_end.
+    -- Target = $5M placeholder.
+    -- JSON keys: properties_jsonb is logged as either
+    -- snake_case (opp_id, deal_value) or camelCase
+    -- (oppId, dealValue) depending on producer; coalesce
+    -- both forms per benchmark-spec §3.3.1 messiness.
+    -- Event timestamps are normalized via the per-row
+    -- `timezone` column (~30% LA, rest UTC) before
+    -- comparing to period_end.
+    WITH open_opps AS (
+      SELECT
+        COALESCE(e.properties_jsonb->>'opp_id',
+                 e.properties_jsonb->>'oppId') AS opp_id,
+        COALESCE(e.properties_jsonb->>'deal_value',
+                 e.properties_jsonb->>'dealValue')::numeric
+          AS deal_value
+      FROM fct_events e
+      WHERE e.event_type = 'opp_created'
+        AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < ${period_end}
+        AND NOT EXISTS (
+          SELECT 1 FROM fct_events e2
+          WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                         e2.properties_jsonb->>'oppId')
+              = COALESCE(e.properties_jsonb->>'opp_id',
+                         e.properties_jsonb->>'oppId')
+            AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+            AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < ${period_end}
+        )
+    )
+    SELECT
+      SUM(deal_value) / 5000000.0 AS coverage_ratio
+    FROM open_opps
+  plain_language_spec: |
+    Sum of open-opportunity deal values divided by the
+    period booking target ($5M placeholder). An opportunity
+    is "open" if `opp_created` fired but no
+    `opp_won`/`opp_lost`/`opp_no_decision` followed before
+    period_end. Reported as a unitless ratio (e.g., 3.5x).
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: vp_sales
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Bucketed by raw `fct_events.timestamp` without
+        normalizing via the per-row `timezone` column.
+        ~30% of fct_events rows are stored in
+        America/Los_Angeles wall-clock; the raw bucket
+        mis-attributes ~30% of events at period boundaries
+        (an opp created on 2025-09-30 23:00 LA was excluded
+        from a Q4 cutoff at 2025-10-01 even though it
+        belonged in the Q3 pipeline). Tightened in v2 by
+        normalizing via timezone column.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly"]
+    default_grain: "quarterly"
+  canonical_filters:
+    - "Open opportunity = created without won/lost/no-decision close"
+    - "Target is the period bookings target ($5M placeholder)"
+    - "JSON path normalization required (warehouse messiness)"
+    - "Normalize fct_events.timestamp via per-row timezone column before windowing"
+
+variants:
+  - id: A
+    label: "Sum of all opp deal values / target"
+    sql_template: |
+      WITH all_opps AS (
+        SELECT (properties_jsonb->>'deal_value')::numeric AS deal_value
+        FROM fct_events
+        WHERE event_type = 'opp_created'
+          AND timestamp < ${period_end}
+      )
+      SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+      FROM all_opps
+    why_someone_might_pick_this: |
+      An analyst summing all opportunities ever created.
+      Doesn't filter for "still open." Common when the
+      analyst hasn't been told to exclude won/lost/
+      no-decision.
+    why_governed_disagrees: |
+      Counts already-resolved opportunities (won, lost,
+      no-decision) as still-open pipeline. Inflates
+      coverage ratio by the historical resolved volume —
+      typically 3-5x in a long-running pipeline.
+
+  - id: B
+    label: "Open opportunities only (NOT EXISTS resolved follow-up), timezone-normalized (GOVERNED)"
+    sql_template: |
+      -- JSON keys: coalesce snake_case + camelCase
+      -- (warehouse messiness layer per benchmark-spec §3.3.1).
+      -- Timestamps normalized via the per-row `timezone`
+      -- column before comparing to period_end.
+      WITH open_opps AS (
+        SELECT
+          COALESCE(e.properties_jsonb->>'opp_id',
+                   e.properties_jsonb->>'oppId') AS opp_id,
+          COALESCE(e.properties_jsonb->>'deal_value',
+                   e.properties_jsonb->>'dealValue')::numeric
+            AS deal_value
+        FROM fct_events e
+        WHERE e.event_type = 'opp_created'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < ${period_end}
+          AND NOT EXISTS (
+            SELECT 1 FROM fct_events e2
+            WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                           e2.properties_jsonb->>'oppId')
+                = COALESCE(e.properties_jsonb->>'opp_id',
+                           e.properties_jsonb->>'oppId')
+              AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+              AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < ${period_end}
+          )
+      )
+      SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+      FROM open_opps
+    why_someone_might_pick_this: |
+      An analyst with the open-opportunity logic correctly
+      expressed via NOT EXISTS over follow-up events, with
+      JSON-key coalescing AND per-row timezone normalization.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Late-stage-only pipeline coverage (commit + best-case stages)"
+    sql_template: |
+      WITH late_stage AS (
+        SELECT
+          e.properties_jsonb->>'opp_id' AS opp_id,
+          (e.properties_jsonb->>'deal_value')::numeric AS deal_value
+        FROM fct_events e
+        WHERE e.event_type = 'opp_stage_advanced'
+          AND e.properties_jsonb->>'stage' IN ('commit', 'best_case')
+          AND e.timestamp < ${period_end}
+          AND NOT EXISTS (
+            SELECT 1 FROM fct_events e2
+            WHERE e2.properties_jsonb->>'opp_id' = e.properties_jsonb->>'opp_id'
+              AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+              AND e2.timestamp < ${period_end}
+          )
+      )
+      SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+      FROM late_stage
+    why_someone_might_pick_this: |
+      A sales-leadership variant that only counts late-
+      stage commit/best-case pipeline as "real" coverage.
+      Earlier-stage opportunities are noise. Common at
+      enterprise companies where pipeline value at
+      early stages is highly speculative.
+    why_governed_disagrees: |
+      Different scope. The governed Pipeline Coverage is
+      all-stage; late-stage is a separate metric ("Commit
+      Coverage" or "Late-Stage Coverage"). Returns a much
+      smaller number — typically 30-50% of governed —
+      and is not interchangeable.
+
+  - id: D
+    label: "Weighted pipeline (deal_value × stage probability)"
+    sql_template: |
+      WITH stage_probabilities AS (
+        SELECT 'best_case' AS stage, 0.7 AS prob
+        UNION ALL SELECT 'commit', 0.9
+        UNION ALL SELECT 'qualified', 0.4
+        UNION ALL SELECT 'created', 0.1
+      ),
+      open_opps AS (
+        SELECT
+          e.properties_jsonb->>'opp_id' AS opp_id,
+          (e.properties_jsonb->>'deal_value')::numeric AS deal_value,
+          COALESCE(e.properties_jsonb->>'stage', 'created') AS stage
+        FROM fct_events e
+        WHERE e.event_type = 'opp_created'
+          AND e.timestamp < ${period_end}
+          AND NOT EXISTS (
+            SELECT 1 FROM fct_events e2
+            WHERE e2.properties_jsonb->>'opp_id' = e.properties_jsonb->>'opp_id'
+              AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+              AND e2.timestamp < ${period_end}
+          )
+      )
+      SELECT
+        SUM(o.deal_value * p.prob) / 5000000.0 AS coverage_ratio
+      FROM open_opps o
+      JOIN stage_probabilities p ON p.stage = o.stage
+    why_someone_might_pick_this: |
+      A statistically-rigorous pipeline coverage that
+      weights each open opportunity by its stage-implied
+      probability of close. Used in forecasting tools
+      and sometimes in board-presented commit numbers.
+    why_governed_disagrees: |
+      Different methodology. The governed Pipeline
+      Coverage is unweighted (raw deal value); weighted
+      coverage is a separate metric ("Forecast" or
+      "Probability-Weighted Pipeline") that should not
+      be reported as Coverage without qualifier.
+
+  - id: E
+    label: "Open opps, JSON path mismatched (camelCase only)"
+    sql_template: |
+      WITH open_opps AS (
+        SELECT
+          e.properties_jsonb->>'oppId' AS opp_id,
+          (e.properties_jsonb->>'dealValue')::numeric AS deal_value
+        FROM fct_events e
+        WHERE e.event_type = 'opp_created'
+          AND e.timestamp < ${period_end}
+          AND NOT EXISTS (
+            SELECT 1 FROM fct_events e2
+            WHERE e2.properties_jsonb->>'oppId' = e.properties_jsonb->>'oppId'
+              AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+              AND e2.timestamp < ${period_end}
+          )
+      )
+      SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+      FROM open_opps
+    why_someone_might_pick_this: |
+      An analyst with the right open-opp logic but who
+      sampled `properties_jsonb` and saw the camelCase
+      keys. Same JSON-path-mismatch trap as
+      win_rate variant E.
+    why_governed_disagrees: |
+      Misses ~40% of opportunities (those logged with
+      snake_case keys). Returns a coverage ratio
+      computed over a smaller population.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our pipeline
+  coverage for next quarter?", "Coverage by sales rep",
+  "Coverage trend over the year", "Compare commit
+  vs total coverage" (forces variant choice).
+notes_for_context_blocks: |
+  Same hardcoded $5M target as governed. Same JSON-path
+  messiness as win_rate. Baseline C's Cube
+  definitions for pipeline are typically just
+  `SUM(deal_value)` — missing the open-status NOT EXISTS
+  filter and the path-normalization issue.

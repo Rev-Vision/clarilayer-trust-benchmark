@@ -1,0 +1,151 @@
+# Test questions for churn_rate.
+# Governed variant: A — cohort-matched logo churn. Numerator counts
+# only the customers FROM the starting cohort who churned in-period
+# (intersection of starting cohort and all in-period churns).
+# Denominator: starting cohort. Both exclude test customers. Result
+# is mathematically bounded in [0, 100%] by definition.
+
+- id: churn_rate-001
+  metric_key: churn_rate
+  governed_variant: A
+  question: "What was our customer churn rate in Q1 2026?"
+  expected_sql: |
+    WITH starting_cohort AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2026-01-01'
+        AND s.started_at < TIMESTAMP '2026-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+    ),
+    churned_in_period AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2026-01-01'
+        AND c.churned_at < TIMESTAMP '2026-04-01'
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+       WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+      / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+      AS churn_rate_pct
+  expected_value: 2.7450
+  acceptable_alternatives:
+    - "Equivalent SQL using dim_customers.churned_at as the churn signal, beginning-of-period denominator, a cohort-matched numerator (constrained to the starting cohort), AND a temporal-only sub predicate on the starting cohort (no current-state status filter)."
+  unacceptable_variants:
+    - "B — revenue-weighted churn (different unit; 2-4x apart)"
+    - "C — fct_subscriptions.status='cancelled' instead of churned_at (~10% disagreement)"
+    - "D — net churn (gross minus expansion; conflates with NRR)"
+    - "E — average-denominator churn (typically 0.5-1pp lower)"
+    - "F — naive denominator-mismatch (any churn / starting cohort) — pre-v3 governed bug; produces unbounded results on small cohorts"
+    - "Variants that include `s.status = 'active'` in the starting-cohort CTE (current-state filter excludes customers who were live at period_start but have since churned, suppressing churn in both numerator and denominator)"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: churn_rate-002
+  metric_key: churn_rate
+  governed_variant: A
+  question: "What was our customer churn rate in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH starting_cohort AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-10-01'
+        AND s.started_at < TIMESTAMP '2025-10-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-10-01')
+    ),
+    churned_in_period AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2025-10-01'
+        AND c.churned_at < TIMESTAMP '2026-01-01'
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+       WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+      / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+      AS churn_rate_pct
+  expected_value: 2.6879
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window (temporal-only sub predicate; no s.status='active' on the starting cohort)."
+  unacceptable_variants:
+    - "Variants B/C/D/E/F."
+    - "Variants that include `s.status = 'active'` in the starting-cohort CTE."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: churn_rate-003
+  metric_key: churn_rate
+  governed_variant: A
+  question: "What was our customer churn rate over fiscal year 2025?"
+  expected_sql: |
+    WITH starting_cohort AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-01-01'
+        AND s.started_at < TIMESTAMP '2025-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+    ),
+    churned_in_period AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2025-01-01'
+        AND c.churned_at < TIMESTAMP '2026-01-01'
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+       WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+      / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+      AS churn_rate_pct
+  expected_value: 10.0267
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window (temporal-only sub predicate; no s.status='active' on the starting cohort)."
+  unacceptable_variants:
+    - "Variants B/C/D/E/F. Variant F (the pre-v3 naive shape, which still uses s.status='active' in its starting cohort) returns ~71% — much higher than the cohort-matched truth because the small status-gated denominator combined with the un-intersected numerator inflates the ratio."
+    - "Variants that include `s.status = 'active'` in the starting-cohort CTE (yields ~0.42% — drastically suppressed because the current-state filter drops every customer who was live at 2025-01-01 but has since churned)."
+  difficulty: hard
+  ambiguity_axis: time_logic
+
+- id: churn_rate-004
+  metric_key: churn_rate
+  governed_variant: A
+  question: "What was our customer churn rate in fiscal year 2024?"
+  expected_sql: |
+    WITH starting_cohort AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2024-01-01'
+        AND s.started_at < TIMESTAMP '2024-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2024-01-01')
+    ),
+    churned_in_period AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2024-01-01'
+        AND c.churned_at < TIMESTAMP '2025-01-01'
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+       WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+      / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+      AS churn_rate_pct
+  expected_value: 7.9576
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2024 window (temporal-only sub predicate; no s.status='active' on the starting cohort). Cohort-matching keeps the result bounded in [0,100%] — the warehouse's small status-gated early cohort (144 starting customers under the variant F shape) plus a year of churns drives the pre-v3 naive shape (variant F) to 152%, but cohort-matched on the corrected (temporal-only) starting cohort returns the true within-cohort churn fraction."
+  unacceptable_variants:
+    - "Variants B/C/D/E."
+    - "Variant F — the pre-v3 naive denominator-mismatch shape that produces the 152% output (the discriminator: an analyst who hasn't read the metric record and lifts the textbook formula mechanically lands on F's unbounded result)."
+    - "Variants that include `s.status = 'active'` in the starting-cohort CTE (drastically suppresses both numerator and denominator — would have returned ~2.08% under the v3-with-status shape)."
+  difficulty: hard
+  ambiguity_axis: filter

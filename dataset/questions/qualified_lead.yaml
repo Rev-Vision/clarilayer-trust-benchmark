@@ -1,0 +1,157 @@
+# Test questions for qualified_lead.
+# Governed variant: B — new user (created in period) with an explicit
+# `lead_qualified` event in their first 14 days, on a non-test customer
+# in target industry (saas/fintech/ecommerce/healthcare with LOWER+TRIM
+# normalization), non-deleted.
+#
+# Synthetic-warehouse note: D6's seed emits `lead_qualified` events for
+# ~6% of new users created in the last six months, so the governed
+# metric is non-zero across recent periods. Variants A/D/E return
+# different (typically larger) populations, and variant C (the previous
+# v2 governed, ≥10 events in 14d) is structurally zero against this
+# warehouse — that miscalibration is exactly why v3 retired it.
+
+- id: qualified_lead-001
+  metric_key: qualified_lead
+  governed_variant: B
+  question: "How many marketing-qualified leads did we generate in March 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2026-03-01'
+      AND u.created_at < TIMESTAMP '2026-04-01'
+      AND u.deleted_at IS NULL
+      AND c.is_test = false
+      AND EXISTS (
+        SELECT 1 FROM fct_events e
+        WHERE e.user_id = u.user_id
+          AND e.event_type = 'lead_qualified'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              >= u.created_at
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              < u.created_at + INTERVAL '14 days'
+      )
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+  expected_value: 78
+  acceptable_alternatives:
+    - "Equivalent SQL with the lead_qualified-event-in-first-14d signal, industry-enum normalization, and non-test/non-deleted filters."
+  unacceptable_variants:
+    - "A — any new user (returns full month of signups: thousands)"
+    - "C — engagement-threshold (≥10 events / 14d); structurally zero against warehouse engagement density (the v2 governed bug)"
+    - "D — sales_qualified event count (different signal entirely)"
+    - "E — customer-level qualification without engagement gate"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: qualified_lead-002
+  metric_key: qualified_lead
+  governed_variant: B
+  question: "How many qualified leads did we generate in Q1 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2026-01-01'
+      AND u.created_at < TIMESTAMP '2026-04-01'
+      AND u.deleted_at IS NULL
+      AND c.is_test = false
+      AND EXISTS (
+        SELECT 1 FROM fct_events e
+        WHERE e.user_id = u.user_id
+          AND e.event_type = 'lead_qualified'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              >= u.created_at
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              < u.created_at + INTERVAL '14 days'
+      )
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+  expected_value: 278
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q1 2026 window."
+  unacceptable_variants:
+    - "Variant A — returns ~13,000 (any signup) for the same window."
+    - "Variant C — structurally zero (v2 governed bug)."
+    - "Variant E — non-zero (counts target-industry signups regardless of qualification)."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: qualified_lead-003
+  metric_key: qualified_lead
+  governed_variant: B
+  question: "How many qualified leads did we generate in fiscal year 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2025-01-01'
+      AND u.created_at < TIMESTAMP '2026-01-01'
+      AND u.deleted_at IS NULL
+      AND c.is_test = false
+      AND EXISTS (
+        SELECT 1 FROM fct_events e
+        WHERE e.user_id = u.user_id
+          AND e.event_type = 'lead_qualified'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              >= u.created_at
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              < u.created_at + INTERVAL '14 days'
+      )
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+  expected_value: 321
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E — each returns very different non-governed numbers in this window."
+  difficulty: hard
+  ambiguity_axis: filter
+
+- id: qualified_lead-004
+  metric_key: qualified_lead
+  governed_variant: B
+  question: "How many qualified leads did we generate in Q4 of fiscal year 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2025-10-01'
+      AND u.created_at < TIMESTAMP '2026-01-01'
+      AND u.deleted_at IS NULL
+      AND c.is_test = false
+      AND EXISTS (
+        SELECT 1 FROM fct_events e
+        WHERE e.user_id = u.user_id
+          AND e.event_type = 'lead_qualified'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              >= u.created_at
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              < u.created_at + INTERVAL '14 days'
+      )
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+  expected_value: 321
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic

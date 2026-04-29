@@ -1,0 +1,182 @@
+metric_key: daily_active_users
+name: Daily Active Users (DAU)
+description: |
+  Distinct users who took an action in the product on a given
+  day. Same definitional ambiguity as Active User but at a
+  daily grain — which makes the timezone problem dramatically
+  worse. A user active at 11 PM Pacific shows up on a
+  different "day" than a user active at 1 AM Pacific
+  depending on the connection's timezone interpretation.
+  Produces silent ~7% DAU swings in this warehouse.
+
+governed_definition:
+  variant_id: C
+  sql_template: |
+    SELECT COUNT(DISTINCT u.user_id) AS dau
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        >= ${date}::timestamp
+      AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+        < ${date}::timestamp + INTERVAL '1 day'
+      AND EXISTS (
+        SELECT 1 FROM fct_subscriptions s
+        WHERE s.customer_id = u.customer_id
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at <= ${date}
+          AND (s.ended_at IS NULL OR s.ended_at > ${date})
+      )
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  plain_language_spec: |
+    Count of distinct users whose `last_active_at`,
+    interpreted in the workspace's timezone (America/Los_Angeles),
+    falls inside the calendar day. The customer must have a
+    paid active subscription on that day. Test customers and
+    soft-deleted users are excluded. The timezone
+    normalization is critical — `last_active_at` rows in
+    this warehouse mix UTC and America/Los_Angeles.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: product
+  approver: head_of_product
+  approved_at: "2026-03-18"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Did not normalize timestamps to a single timezone
+        before bucketing by day. Caused DAU on the same
+        date to differ by 5-8% based on the query
+        connection's TIME ZONE setting. Retired after the
+        product team noticed weekday-vs-weekend DAU
+        boundaries shifting depending on which engineer
+        ran the query.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily"]
+    default_grain: "daily"
+  canonical_filters:
+    - "Normalize last_active_at to workspace timezone (America/Los_Angeles)"
+    - "Customer subscription must be active on the queried date"
+    - "Exclude test customers and soft-deleted users"
+
+variants:
+  - id: A
+    label: "Naive UTC day bucket on last_active_at"
+    sql_template: |
+      SELECT COUNT(DISTINCT user_id) AS dau
+      FROM dim_users
+      WHERE last_active_at >= ${date}::timestamp
+        AND last_active_at < ${date}::timestamp + INTERVAL '1 day'
+    why_someone_might_pick_this: |
+      The most direct query. Picks `last_active_at`,
+      buckets by date, no timezone manipulation. Default
+      assumption that timestamps are stored in UTC.
+    why_governed_disagrees: |
+      In this warehouse, ~30% of `last_active_at` values are
+      logged in America/Los_Angeles (legacy logger), the
+      rest UTC. The naive bucketing produces a DAU that's
+      off by 5-8% depending on which day's boundary lines up
+      with the timezone mix. Also no subscription gate or
+      test filter.
+
+  - id: B
+    label: "Event-trigger DAU"
+    sql_template: |
+      SELECT COUNT(DISTINCT user_id) AS dau
+      FROM fct_events
+      WHERE timestamp >= ${date}::timestamp
+        AND timestamp < ${date}::timestamp + INTERVAL '1 day'
+        AND event_type IN ('login', 'action_performed', 'page_view')
+    why_someone_might_pick_this: |
+      The classic product-analytics DAU: events fired on
+      that day. Useful for engagement analysis at the
+      action level rather than the session level.
+    why_governed_disagrees: |
+      Same timezone problem as variant A — `fct_events.timestamp`
+      mixes UTC and America/Los_Angeles. Plus the orphan
+      problem: ~3% of event rows reference users not in
+      `dim_users`, which inflates DAU by counting users that
+      can't actually be associated with a customer. No
+      subscription gate; no test filter.
+
+  - id: C
+    label: "Timezone-normalized DAU on paying-customer users (GOVERNED)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS dau
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+          >= ${date}::timestamp
+        AND u.last_active_at AT TIME ZONE 'America/Los_Angeles'
+          < ${date}::timestamp + INTERVAL '1 day'
+        AND EXISTS (
+          SELECT 1 FROM fct_subscriptions s
+          WHERE s.customer_id = u.customer_id
+            AND s.status = 'active'
+            AND s.mrr > 0
+            AND s.started_at <= ${date}
+            AND (s.ended_at IS NULL OR s.ended_at > ${date})
+        )
+        AND c.is_test = false
+        AND u.deleted_at IS NULL
+    why_someone_might_pick_this: |
+      An analyst who knows about the timezone mix and the
+      paying-customer convention. Uses AT TIME ZONE +
+      EXISTS with subscription state.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: D
+    label: "DATE_TRUNC by day on UTC-cast timestamps"
+    sql_template: |
+      SELECT COUNT(DISTINCT user_id) AS dau
+      FROM dim_users
+      WHERE DATE_TRUNC('day', last_active_at AT TIME ZONE 'UTC')
+        = ${date}::date
+    why_someone_might_pick_this: |
+      An analyst using DATE_TRUNC for cleanliness, casting
+      to UTC explicitly to be timezone-aware. The
+      timezone-aware part feels right.
+    why_governed_disagrees: |
+      Picked the wrong target timezone — UTC instead of
+      the workspace's America/Los_Angeles. Off by 7-8 hours
+      from the governed bucket. Plus no subscription gate
+      or test filter.
+
+  - id: E
+    label: "DAU as a 24-hour rolling window from now()"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS dau
+      FROM dim_users u
+      WHERE u.last_active_at >= ${date}::timestamp - INTERVAL '24 hours'
+        AND u.last_active_at < ${date}::timestamp
+    why_someone_might_pick_this: |
+      Some teams interpret DAU as "users active in the last
+      24 hours" rather than "users active on a calendar
+      day." Defensible for monitoring use cases (e.g.,
+      "how many users in the last day"), and the rolling
+      window avoids the calendar-boundary problem.
+    why_governed_disagrees: |
+      Different operational meaning. DAU by convention is
+      a calendar-day metric (e.g., "Monday DAU = 4500"),
+      not a 24-hour-rolling metric. Mixing the two
+      produces non-comparable trends.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "DAU yesterday", "DAU last
+  Monday" (timezone matters), "DAU trend last week" (per-
+  day timezone consistency matters), "Average DAU last
+  month" (depends on whether the average includes
+  zero-DAU days that look zero only because of timezone
+  bucket misalignment).
+notes_for_context_blocks: |
+  Baseline B should mention the timezone mix in
+  `last_active_at` and `fct_events.timestamp` without
+  prescribing the resolution. Baseline C's typical Cube
+  measure for DAU is `COUNT(DISTINCT user_id)` over a
+  daily time grain — usually doesn't normalize timezone.

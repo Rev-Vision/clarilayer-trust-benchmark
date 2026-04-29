@@ -1,0 +1,159 @@
+# Test questions for mrr (Monthly Recurring Revenue).
+# Governed variant: C — same active/non-test/non-churned/positive-MRR
+# subscription gate as ARR but reported at the period-end as-of date,
+# without the ×12 annualization.
+#
+# Ambiguity coverage:
+#   - definition (which variant; refund / test / status filters)
+#   - time logic (period-end as-of vs "right now")
+#   - grouping (by tier)
+#   - trend (MoM)
+#   - filter (cash basis vs subscription book)
+
+- id: mrr-001
+  metric_key: mrr
+  governed_variant: C
+  question: "What was our MRR at the end of March 2026?"
+  expected_sql: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  expected_value: 2037836.75
+  acceptable_alternatives:
+    - "Equivalent SQL with the same filter conjunction returning the same SUM(mrr)."
+  unacceptable_variants:
+    - "A — SUM(mrr) WHERE status='active' (no test/churn/refund filters; ~7-9% inflation)"
+    - "B — adds date-window check but still includes test/refund inflation"
+    - "D — cash-billed (invoice-based) MRR; conflates run-rate with cash receipts"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: mrr-002
+  metric_key: mrr
+  governed_variant: C
+  question: "What was our MRR at the end of December 2025?"
+  expected_sql: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2025-12-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  expected_value: 1307826.53
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on December-31 as-of."
+  unacceptable_variants:
+    - "Variants A/B/D — same shortfalls as mrr-001."
+  difficulty: easy
+  ambiguity_axis: time_logic
+
+- id: mrr-003
+  metric_key: mrr
+  governed_variant: C
+  question: "What was the enterprise-tier MRR at end of March 2026?"
+  expected_sql: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+      AND c.plan_tier = 'enterprise'
+  expected_value: 940904.13
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with dim_customers.plan_tier = 'enterprise'."
+    - "GROUP BY plan_tier breakdown whose enterprise row matches expected_value."
+  unacceptable_variants:
+    - "Grouping by fct_subscriptions.plan instead of dim_customers.plan_tier."
+  difficulty: medium
+  ambiguity_axis: grouping
+
+- id: mrr-004
+  metric_key: mrr
+  governed_variant: C
+  question: "What was the month-over-month MRR change between January 2026 and February 2026?"
+  expected_sql: |
+    WITH feb AS (
+      SELECT SUM(s.mrr) AS mrr FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2026-02-28'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-02-28')
+        AND s.mrr > 0 AND c.is_test = false AND c.churned_at IS NULL
+    ),
+    jan AS (
+      SELECT SUM(s.mrr) AS mrr FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2026-01-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-31')
+        AND s.mrr > 0 AND c.is_test = false AND c.churned_at IS NULL
+    )
+    SELECT feb.mrr - jan.mrr AS mom_change FROM feb, jan
+  expected_value: 225652.89
+  acceptable_alternatives:
+    - "Two governed-variant snapshots and a delta in any equivalent shape."
+  unacceptable_variants:
+    - "MoM computed from variant A or D (no test/refund filter, or cash basis)."
+  difficulty: hard
+  ambiguity_axis: trend
+
+- id: mrr-005
+  metric_key: mrr
+  governed_variant: C
+  question: "What was our MRR at the end of September 2025?"
+  expected_sql: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2025-09-30'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-09-30')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  expected_value: 864196.23
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on September-30 as-of."
+  unacceptable_variants:
+    - "Variants A/B/D."
+    - "Date interpretations that pick a different month-end (timezone confusion)."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: mrr-006
+  metric_key: mrr
+  governed_variant: C
+  question: "What was the pro-tier MRR at the end of March 2026?"
+  expected_sql: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+      AND c.plan_tier = 'pro'
+  expected_value: 766435.52
+  acceptable_alternatives:
+    - "Equivalent SQL with governed filters and dim_customers.plan_tier='pro'."
+    - "GROUP BY plan_tier breakdown whose pro row matches expected_value."
+  unacceptable_variants:
+    - "Grouping by fct_subscriptions.plan instead of dim_customers.plan_tier (different dimension)."
+    - "Variants A/B without test/churn/refund filters."
+  difficulty: medium
+  ambiguity_axis: grouping

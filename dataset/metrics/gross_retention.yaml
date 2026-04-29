@@ -1,0 +1,306 @@
+metric_key: gross_retention
+name: Gross Retention (GRR)
+description: |
+  The percentage of revenue retained from the existing
+  customer base, gross of expansion. Typically expressed as
+  GRR = 100% - (churn% + contraction%). Different from Net
+  Retention because it caps at 100% — gross retention can
+  never exceed the starting book. The headline efficiency
+  metric for "are we keeping what we have." Variant
+  ambiguity is mostly about whether the base is logos or
+  revenue, what counts as contraction, and (the v2 fix)
+  whether status='active' is treated as a temporal
+  predicate (it isn't).
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Temporal-only filters on subscription state. status reflects
+    -- current sub state, not historical period state, so it is
+    -- intentionally absent from the CASE WHEN predicates that
+    -- decide whether a sub was live during period_start /
+    -- period_end. mrr > 0 is kept to exclude refund-row
+    -- accounting artifacts. End-exclusive boundary convention.
+    WITH starting AS (
+      SELECT c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < ${period_start}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < ${period_end}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    )
+    SELECT
+      SUM(LEAST(e.arr_end, s.arr_start))::float
+        / NULLIF(SUM(s.arr_start), 0) * 100 AS gross_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  plain_language_spec: |
+    For each existing customer (signup before period_start,
+    not test), compute end-of-period MRR capped at start-of-
+    period MRR (LEAST() prevents expansion from inflating
+    the metric above 100%). Sum across customers, divide by
+    total start-of-period MRR, multiply by 100. The status
+    filter is intentionally absent — `s.status` reflects
+    current state, not historical, so filtering on it
+    incorrectly excludes subs that were active during the
+    period but have since transitioned. End-exclusive
+    boundary convention. Reported as a percentage that is
+    always ≤ 100%.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `s.status = 'active'` inside the temporal CASE
+        WHEN predicates. Status reflects the current
+        subscription state, not the state during the
+        historical period — a sub that was active during
+        a 2024 quarter but has since cancelled was wrongly
+        excluded from the 2024 ARR calculation, suppressing
+        real contraction observable in the warehouse and
+        producing an artificially flat 100% GRR on quarters
+        with downgrade activity. Retired in v2 in favor of
+        temporal-only predicates.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["quarterly", "annual"]
+    default_grain: "annual"
+  canonical_filters:
+    - "Existing customers only (signup before period_start)"
+    - "Exclude test customers"
+    - "Cap end-of-period MRR at start to exclude expansion (LEAST)"
+    - "Temporal-only sub predicate: started_at < boundary AND (ended_at IS NULL OR ended_at > boundary)"
+    - "mrr > 0 keeps refund-row accounting out; status filter is intentionally absent"
+    - "End-exclusive boundary convention"
+
+variants:
+  - id: A
+    label: "Logo retention: customers retained ÷ customers at start"
+    sql_template: |
+      WITH starting AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND (c.churned_at IS NULL OR c.churned_at >= ${period_start})
+      ),
+      retained AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND (c.churned_at IS NULL OR c.churned_at >= ${period_end})
+      )
+      SELECT (retained.n::float / NULLIF(starting.n, 0)) * 100 AS gross_retention_pct
+      FROM starting, retained
+    why_someone_might_pick_this: |
+      An analyst who interprets "gross retention" as the
+      logo-retention complement of churn rate. Some
+      smaller companies actually do report GRR as a
+      logo-count metric.
+    why_governed_disagrees: |
+      Logo retention ignores the revenue weight — losing 10
+      small accounts looks the same as losing 1 enterprise
+      account. The standard SaaS convention is revenue-
+      weighted GRR; logo retention is a separate metric
+      sometimes called "logo GRR" with explicit qualifier.
+
+  - id: B
+    label: "Revenue-weighted GRR with end-period MRR capped at start, temporal-only filters (GOVERNED)"
+    sql_template: |
+      WITH starting AS (
+        SELECT c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      ),
+      ending AS (
+        SELECT c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT
+        SUM(LEAST(e.arr_end, s.arr_start))::float
+          / NULLIF(SUM(s.arr_start), 0) * 100 AS gross_retention_pct
+      FROM starting s
+      JOIN ending e ON e.customer_id = s.customer_id
+      WHERE s.arr_start > 0
+    why_someone_might_pick_this: |
+      An analyst familiar with the LEAST() trick to cap
+      end at start, who has internalized that `status`
+      is a current-state column (not historical), and
+      uses temporal-only predicates with end-exclusive
+      boundaries.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Revenue retention without expansion cap"
+    sql_template: |
+      WITH starting AS (
+        SELECT SUM(s.mrr) AS arr_start
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.mrr > 0
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      ending AS (
+        SELECT SUM(s.mrr) AS arr_end
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.mrr > 0
+          AND s.started_at < ${period_end}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+      )
+      SELECT (ending.arr_end / NULLIF(starting.arr_start, 0)) * 100
+        AS gross_retention_pct
+      FROM starting, ending
+    why_someone_might_pick_this: |
+      An analyst computing retention as "what's the existing
+      book worth at the end as a percentage of what it was
+      worth at the start." Forgets the cap.
+    why_governed_disagrees: |
+      This is actually Net Retention, not Gross Retention.
+      Without the LEAST() cap, expansion from existing
+      customers pushes the result above 100%, which violates
+      the GRR convention (GRR is bounded above at 100% by
+      definition). Confuses GRR with NRR.
+
+  - id: D
+    label: "1 - revenue-churn-rate"
+    sql_template: |
+      WITH starting_arr AS (
+        SELECT SUM(s.mrr) * 12 AS arr_start
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.mrr > 0
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      churned_arr AS (
+        SELECT SUM(s.mrr) * 12 AS arr_lost
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      )
+      SELECT (1 - (arr_lost / NULLIF(arr_start, 0))) * 100
+        AS gross_retention_pct
+      FROM starting_arr, churned_arr
+    why_someone_might_pick_this: |
+      An analyst reasoning "GRR = 1 - revenue churn." The
+      complement-of-churn shape is a clean derivation that
+      captures most of the same information.
+    why_governed_disagrees: |
+      Misses contraction — customers who shrunk but didn't
+      fully churn. GRR is supposed to capture both
+      full-customer loss AND partial contraction. The
+      complement-of-churn shape only captures the first.
+
+  - id: E
+    label: "Status='active' temporal filter (PRE-v2 GOVERNED)"
+    sql_template: |
+      WITH starting AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.status = 'active'
+                  AND s.mrr > 0
+                  AND s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                THEN s.mrr ELSE 0
+              END) AS arr_start
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      ),
+      ending AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.status = 'active'
+                  AND s.mrr > 0
+                  AND s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                THEN s.mrr ELSE 0
+              END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT
+        SUM(LEAST(e.arr_end, s.arr_start))::float
+          / NULLIF(SUM(s.arr_start), 0) * 100 AS gross_retention_pct
+      FROM starting s
+      JOIN ending e ON e.customer_id = s.customer_id
+      WHERE s.arr_start > 0
+    why_someone_might_pick_this: |
+      An analyst inheriting the v1 governed shape — uses
+      `status = 'active'` inside the CASE WHEN predicates
+      alongside the temporal predicate.
+    why_governed_disagrees: |
+      The status filter excludes subs that were active
+      during the period but are now `cancelled` (because
+      they were replaced via downgrade or because the
+      customer churned). Both arr_start and arr_end get
+      reduced symmetrically, masking real contraction —
+      produces an artificially flat ~100% GRR on quarters
+      with downgrade activity. Retired in v2.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our gross retention
+  this fiscal year?", "GRR by customer tier", "Compare
+  GRR vs NRR" (forces analyst to pick the cap).
+notes_for_context_blocks: |
+  Baseline C's typical Cube measure for GRR often skips
+  the cap (variant C) and rarely uses temporal-only sub
+  predicates. The governed lift here is the cap +
+  contraction-aware shape + status-filter-aware
+  reasoning.

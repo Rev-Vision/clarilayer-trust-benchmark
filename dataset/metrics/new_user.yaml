@@ -1,0 +1,166 @@
+metric_key: new_user
+name: New User
+description: |
+  A user who joined within a given time window. Variant
+  ambiguity centers on what counts as "joining" — first
+  account creation (`created_at`), first product action
+  (event-based first-touch), or first subscription
+  attribution (sales-funnel-aligned). The customer-vs-user
+  distinction also matters: a "new user" can be a fresh user
+  on an existing customer (seat addition) or the first user
+  of a brand-new customer (acquisition).
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= ${period_start}
+      AND u.created_at < ${period_end}
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  plain_language_spec: |
+    Count of distinct users whose `created_at` falls in the
+    period, on non-test customers, not soft-deleted. Includes
+    both new users on existing customers (seat additions)
+    and first-users on new customers. Granularity is the
+    user, not the customer.
+
+governance_metadata:
+  version: "v1"
+  lifecycle_status: APPROVED
+  owner_team: product
+  approver: head_of_product
+  approved_at: "2026-03-12"
+  deprecated_versions: []
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily", "weekly", "monthly", "quarterly"]
+    default_grain: "weekly"
+  canonical_filters:
+    - "Exclude test customers"
+    - "Exclude soft-deleted users"
+    - "Source of truth is dim_users.created_at"
+
+variants:
+  - id: A
+    label: "Users with created_at in window (no filters)"
+    sql_template: |
+      SELECT COUNT(*) AS new_users
+      FROM dim_users
+      WHERE created_at >= ${period_start}
+        AND created_at < ${period_end}
+    why_someone_might_pick_this: |
+      The simplest possible "new users" query. Reads
+      `created_at` directly, no joins.
+    why_governed_disagrees: |
+      Doesn't exclude test customers (~5% inflation) or
+      soft-deleted users (~3% of departed users have
+      `deleted_at` set, mostly in the bot-account
+      cleanup batch). Counts COUNT(*) instead of
+      COUNT(DISTINCT) — usually equivalent but vulnerable
+      if the warehouse has duplicate-ish rows on
+      `dim_users` from botched imports.
+
+  - id: B
+    label: "Distinct users with created_at in window, non-test, non-deleted (GOVERNED)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS new_users
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.created_at >= ${period_start}
+        AND u.created_at < ${period_end}
+        AND c.is_test = false
+        AND u.deleted_at IS NULL
+    why_someone_might_pick_this: |
+      An analyst with full schema awareness. Filters,
+      distincts, joins for test exclusion.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "First-event-fired user (event-based first-touch)"
+    sql_template: |
+      WITH first_event AS (
+        SELECT user_id, MIN(timestamp) AS first_ts
+        FROM fct_events
+        GROUP BY user_id
+      )
+      SELECT COUNT(DISTINCT fe.user_id) AS new_users
+      FROM first_event fe
+      WHERE fe.first_ts >= ${period_start}
+        AND fe.first_ts < ${period_end}
+    why_someone_might_pick_this: |
+      A product-analytics-first team that defines "new"
+      as "first-action," not "account-created." Common in
+      PLG businesses where account creation can precede
+      activation by weeks. More aligned with engagement
+      definitions of new.
+    why_governed_disagrees: |
+      Different operational definition (first-action vs
+      account-created). Misses users created in the
+      window who haven't fired any event yet.
+      Vulnerable to the orphan-events problem (~3% of
+      events reference users not in `dim_users`) which
+      can produce ghost "new users" with no
+      corresponding row.
+
+  - id: D
+    label: "Customer's first user (acquisition only — excludes seat additions)"
+    sql_template: |
+      WITH first_user_per_cust AS (
+        SELECT customer_id, MIN(created_at) AS first_user_at
+        FROM dim_users
+        GROUP BY customer_id
+      )
+      SELECT COUNT(*) AS new_users
+      FROM first_user_per_cust f
+      JOIN dim_customers c ON c.customer_id = f.customer_id
+      WHERE f.first_user_at >= ${period_start}
+        AND f.first_user_at < ${period_end}
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      A sales/marketing team that wants to track new-
+      customer acquisition. "New users" interpreted as
+      "first user of a new customer" — i.e., new logos.
+      Reasonable for funnel reporting.
+    why_governed_disagrees: |
+      Misses seat additions on existing customers — a
+      Customer that adds 10 new seats wouldn't increment
+      this number, but the governed metric counts those
+      10 new users. Off by ~30-50% in growing
+      businesses.
+
+  - id: E
+    label: "New user with subscription association"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS new_users
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+      WHERE u.created_at >= ${period_start}
+        AND u.created_at < ${period_end}
+        AND s.status = 'active'
+        AND s.mrr > 0
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst gating on paid subscriptions to filter out
+      free-tier sign-ups. Common in pure-paid SaaS
+      reporting where free trials aren't counted.
+    why_governed_disagrees: |
+      Excludes new users on free-tier or trialing
+      subscriptions, which the governed metric includes.
+      Underreports new users by the free/trial volume.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How many new users last
+  quarter?" (acquisition vs seat-add ambiguity), "New
+  users by signup channel", "New user trend last 6
+  months."
+notes_for_context_blocks: |
+  Baseline C's typical Cube definition is
+  `COUNT(DISTINCT user_id) WHERE created_at IN period` —
+  variant A. Governed lift here is the test/deletion
+  filter set.

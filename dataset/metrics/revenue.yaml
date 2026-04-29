@@ -1,0 +1,211 @@
+metric_key: revenue
+name: Revenue
+description: |
+  The total dollar amount of revenue recognized in a period.
+  Distinct from ARR/MRR (run-rate metrics) — Revenue is a
+  flow metric: actual dollars that hit the books in a window.
+  The most ambiguous part is *which* dollars: cash collected
+  via invoice (most accessible), recognized revenue per
+  subscription accrual (most GAAP-correct for SaaS), or some
+  hybrid. Different stakeholders (Finance, Sales, Investors,
+  Product) defensibly want different versions.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Normalize paid_at to the workspace timezone
+    -- (America/Los_Angeles) before windowing. Legacy Braintree
+    -- rows are stored in America/New_York; everything else is
+    -- stored in UTC. See benchmark-spec §3.3.1 messiness layer 3.
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York'
+                          AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC'
+                        AT TIME ZONE 'America/Los_Angeles'
+      END) >= ${period_start}
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York'
+                          AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC'
+                        AT TIME ZONE 'America/Los_Angeles'
+      END) < ${period_end}
+      AND i.status = 'paid'
+      AND c.is_test = false
+  plain_language_spec: |
+    Sum of `amount` across paid invoices whose `paid_at` falls
+    inside the requested period, normalized to the workspace's
+    fiscal-calendar interpretation. Excludes test customers.
+    The period is interpreted in America/Los_Angeles to align
+    with finance close conventions; rows with `paid_at` in
+    other timezones (this warehouse mixes UTC and America/New_York)
+    must be normalized before windowing.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: controller
+  approved_at: "2026-01-20"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Did not normalize `paid_at` timezone before windowing,
+        so the same query produced different "March revenue"
+        depending on the connection's TIME ZONE setting.
+        Retired after a $300K month-end discrepancy traced to
+        rows whose `paid_at` was logged in America/New_York
+        but interpreted as UTC.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily", "weekly", "monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Exclude test customers"
+    - "Exclude unpaid/voided invoices (status = 'paid')"
+    - "Normalize paid_at to workspace timezone before windowing"
+
+variants:
+  - id: A
+    label: "SUM(invoice amount) over period (any status)"
+    sql_template: |
+      SELECT SUM(amount) AS revenue
+      FROM fct_invoices
+      WHERE paid_at >= ${period_start}
+        AND paid_at < ${period_end}
+    why_someone_might_pick_this: |
+      The most direct query an analyst writes when shown a
+      `fct_invoices` table. "Revenue is the sum of invoice
+      amounts" is true at first approximation — and the
+      `status` column might be invisible to someone scanning
+      the schema.
+    why_governed_disagrees: |
+      Includes voided, refunded, and `pending` invoices.
+      Inflates revenue by ~3-5% in this warehouse. Also
+      counts test-customer invoices.
+
+  - id: B
+    label: "Paid invoices over period, excluding test customers (GOVERNED)"
+    sql_template: |
+      -- paid_at normalized to workspace timezone before windowing.
+      SELECT SUM(i.amount) AS revenue
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York'
+                            AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC'
+                          AT TIME ZONE 'America/Los_Angeles'
+        END) >= ${period_start}
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York'
+                            AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC'
+                          AT TIME ZONE 'America/Los_Angeles'
+        END) < ${period_end}
+        AND i.status = 'paid'
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst familiar with the test-account problem.
+      Combines invoice status + test-customer exclusion.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Recognized revenue (subscription accrual basis)"
+    sql_template: |
+      SELECT SUM(s.mrr * months_in_period) AS revenue
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      JOIN LATERAL (
+        SELECT EXTRACT(EPOCH FROM (
+          LEAST(s.ended_at, ${period_end}) -
+          GREATEST(s.started_at, ${period_start})
+        )) / (30.44 * 86400) AS months_in_period
+      ) m ON true
+      WHERE s.started_at < ${period_end}
+        AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      The GAAP-correct way to recognize SaaS revenue: spread
+      contract value over the service period. Required for
+      audited financials. A finance analyst at a public-track
+      company will reach for this version because it's what
+      ASC 606 demands.
+    why_governed_disagrees: |
+      The benchmark's governed definition is cash-basis (per
+      paid invoices) because that's what most operating
+      teams use day-to-day, and the warehouse doesn't
+      explicitly model deferred revenue. Using accrual here
+      mixes a measurement basis with a metric definition;
+      the governed answer expects cash receipts.
+
+  - id: D
+    label: "GMV-style: any cash event in the period"
+    sql_template: |
+      SELECT SUM(amount) AS revenue
+      FROM fct_invoices
+      WHERE (paid_at >= ${period_start} AND paid_at < ${period_end})
+         OR (due_at >= ${period_start} AND due_at < ${period_end})
+    why_someone_might_pick_this: |
+      A growth or sales team that wants to see "all economic
+      activity in the period," counting both collected and
+      due-soon invoices. Useful for forecasting.
+    why_governed_disagrees: |
+      Counts unpaid `due_at` invoices that may never collect.
+      Double-counts when an invoice both falls due and is paid
+      in the same period. Conflates revenue with billings.
+
+  - id: E
+    label: "Net revenue (paid invoices minus refunds via negative MRR)"
+    sql_template: |
+      SELECT
+        SUM(i.amount)
+          - COALESCE((
+              SELECT SUM(ABS(s.mrr) * 1)
+              FROM fct_subscriptions s
+              WHERE s.mrr < 0
+                AND s.started_at >= ${period_start}
+                AND s.started_at < ${period_end}
+            ), 0) AS revenue
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= ${period_start}
+        AND i.paid_at < ${period_end}
+        AND i.status = 'paid'
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst who has discovered the negative-MRR
+      refund-accounting trick in this warehouse and tries
+      to express "net of refunds" in a single query. Often
+      surfaces in a "true revenue" board metric.
+    why_governed_disagrees: |
+      The negative-MRR convention is for run-rate adjustment,
+      not invoice-period refunds — refunds appear in
+      `fct_invoices` directly via voided/credited rows. This
+      variant double-counts the refund offset and applies
+      it to the wrong period.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What was Q1 revenue?" (period +
+  fiscal-calendar + timezone), "Revenue this fiscal quarter"
+  (fiscal-calendar interpretation matters), "March revenue by
+  industry" (filter + grouping), "Revenue trend trailing 12
+  months" (timezone normalization on cross-month boundaries
+  matters most for daily/weekly grain).
+notes_for_context_blocks: |
+  Baseline B's column docs should mention `paid_at` timezone
+  inconsistency without telling the analyst what to do about
+  it. Baseline C's Cube measure typically aggregates
+  `fct_invoices.amount` filtered on `status='paid'` — closest
+  to governed but missing test-customer filter and timezone
+  normalization.

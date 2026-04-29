@@ -1,0 +1,182 @@
+# Test questions for net_retention.
+# Governed variant: B — same-customer end-of-period MRR ÷ start-of-period
+# MRR. Existing customers only, no cap (expansion can push >100%).
+
+- id: net_retention-001
+  metric_key: net_retention
+  governed_variant: B
+  question: "What was our net revenue retention in Q1 2026?"
+  expected_sql: |
+    WITH starting AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2026-01-01'
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2026-04-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-04-01')
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2026-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(e.arr_end)::float
+      / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  expected_value: 100.50
+  acceptable_alternatives:
+    - "Equivalent SQL with existing-customer cohort, beginning-of-period denominator, no cap."
+  unacceptable_variants:
+    - "A — bridge formula (start + expansion - churn); error-prone with contraction"
+    - "C — TTM denominator instead of BoP; produces different number"
+    - "D — aggregate-level (no per-customer cohort); confounds new-business growth with retention"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: net_retention-002
+  metric_key: net_retention
+  governed_variant: B
+  question: "What was our net revenue retention for fiscal year 2025?"
+  expected_sql: |
+    WITH starting AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2025-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(e.arr_end)::float
+      / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  expected_value: 100.84
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: net_retention-003
+  metric_key: net_retention
+  governed_variant: B
+  question: "How does our net retention compare to gross retention for fiscal year 2025? Compute net retention."
+  expected_sql: |
+    WITH starting AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2025-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(e.arr_end)::float
+      / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  expected_value: 100.84
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Confusing NRR with GRR (variant B from gross_retention metric — adds a LEAST cap and drops below 100%)."
+    - "Variants A/C/D from net_retention metric."
+  difficulty: hard
+  ambiguity_axis: definition
+
+- id: net_retention-004
+  metric_key: net_retention
+  governed_variant: B
+  question: "What was our net revenue retention for Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH starting AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2025-10-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-10-01')
+              THEN s.mrr ELSE 0 END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-10-01'
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active' AND s.mrr > 0
+                AND s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-10-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(e.arr_end)::float
+      / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  expected_value: 100.31
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D."
+  difficulty: medium
+  ambiguity_axis: time_logic

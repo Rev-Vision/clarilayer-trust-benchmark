@@ -1,0 +1,173 @@
+# Test questions for arr (Annual Recurring Revenue).
+# Governed variant: C — active, non-test, non-churned, positive-MRR
+# subscriptions on the as-of date window.
+#
+# Ambiguity coverage:
+#   - definition (which variant produces the right number)
+#   - filter (test customers, refund accounting)
+#   - time logic (point-in-time as-of date)
+#   - grouping (by plan_tier)
+#   - trend (MoM delta)
+#
+# All expected_value figures captured by running expected_sql against
+# dataset/warehouse.duckdb.
+
+- id: arr-001
+  metric_key: arr
+  governed_variant: C
+  question: "What was our ARR at the end of March 2026?"
+  expected_sql: |
+    SELECT SUM(s.mrr) * 12 AS arr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  expected_value: 24454041.00
+  acceptable_alternatives:
+    - "Equivalent SQL with the same active/non-test/non-churned/positive-MRR/date-window filter set, returning the same SUM(mrr)*12."
+    - "Subquery / CTE forms that reduce to the same filter conjunction."
+  unacceptable_variants:
+    - "A — SUM(mrr)*12 WHERE status='active' (no test/churn/refund filters; ~6% inflation)"
+    - "B — adds is_test=false but still includes refund rows and stale status='active'"
+    - "D — trailing-30d invoice annualization (cash basis, not subscription book)"
+    - "E — CARR-style annualization that ignores status (includes paused/trial)"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: arr-002
+  metric_key: arr
+  governed_variant: C
+  question: "What was our ARR at the end of fiscal year 2025?"
+  expected_sql: |
+    -- Fiscal calendar starts in January (per governance metadata),
+    -- so fiscal year 2025 ends 2025-12-31.
+    SELECT SUM(s.mrr) * 12 AS arr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2025-12-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  expected_value: 15693918.36
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with the same December-31 as-of."
+  unacceptable_variants:
+    - "Any variant that shifts the as-of to a non-fiscal-year-end date."
+    - "Variant A / B / E — same definitional shortfalls as arr-001."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: arr-003
+  metric_key: arr
+  governed_variant: C
+  question: "What was the enterprise-tier ARR at the end of March 2026?"
+  expected_sql: |
+    -- The governed Customer plan_tier dimension lives on
+    -- dim_customers.plan_tier (subscriptions also carry a `plan`
+    -- column, but the customer-level tier is the canonical grouping
+    -- dimension for governed metrics).
+    SELECT SUM(s.mrr) * 12 AS arr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+      AND c.plan_tier = 'enterprise'
+  expected_value: 11290849.56
+  acceptable_alternatives:
+    - "Equivalent SQL with all governed filters plus enterprise-tier filter on dim_customers.plan_tier."
+    - "Full GROUP BY plan_tier breakdown that yields the enterprise row equal to the expected_value."
+  unacceptable_variants:
+    - "Grouping by fct_subscriptions.plan instead of dim_customers.plan_tier (different dimension; produces different subtotals because plan is the per-subscription product line, not the customer-level tier)."
+    - "Variants A/B that miss customer-level filters (test/churn/refund)."
+  difficulty: medium
+  ambiguity_axis: grouping
+
+- id: arr-004
+  metric_key: arr
+  governed_variant: C
+  question: "What was the month-over-month change in ARR from February 2026 to March 2026?"
+  expected_sql: |
+    WITH mar AS (
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2026-03-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    ),
+    feb AS (
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2026-02-28'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-02-28')
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    )
+    SELECT mar.arr - feb.arr AS arr_mom_change FROM mar, feb
+  expected_value: 3701526.72
+  acceptable_alternatives:
+    - "Two governed-variant queries on month-end as-of dates with the difference computed in any equivalent way."
+    - "Single-window CTE expressing both as-of evaluations and computing the delta."
+  unacceptable_variants:
+    - "MoM computed from variant A (no test/churn filter)."
+    - "MoM computed using `paid_at` / cash basis instead of subscription book."
+  difficulty: hard
+  ambiguity_axis: trend
+
+- id: arr-005
+  metric_key: arr
+  governed_variant: C
+  question: "How much did ARR grow year-to-date in 2026?"
+  expected_sql: |
+    -- YTD growth = ARR at most-recent governed snapshot
+    -- (2026-03-31, since latest fiscal-month end in scope) minus
+    -- ARR at fiscal-year start (effectively the 2025-12-31 snapshot
+    -- since fiscal year aligns with calendar year per metadata).
+    WITH now_arr AS (
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2026-03-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    ),
+    fy_start_arr AS (
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    )
+    SELECT now_arr.arr - fy_start_arr.arr AS arr_ytd_growth
+    FROM now_arr, fy_start_arr
+  expected_value: 8760122.64
+  acceptable_alternatives:
+    - "Two governed-variant snapshots and a delta in any equivalent shape."
+  unacceptable_variants:
+    - "Trailing-12m or invoice-cash-flow YTD interpretations (variant D)."
+    - "Variants ignoring the fiscal calendar (use of e.g. June-30 as YTD anchor)."
+  difficulty: hard
+  ambiguity_axis: time_logic

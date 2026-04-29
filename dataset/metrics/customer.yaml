@@ -1,0 +1,175 @@
+metric_key: customer
+name: Customer
+description: |
+  A unique customer counted at a point in time. Sounds
+  simple, but is the most filter-ambiguous metric in the
+  catalog because every team has their own implicit
+  definition: Finance counts paying customers (subscription
+  active), Sales counts active accounts (any signup),
+  Product counts engaged customers (some user activity),
+  CSM counts retained customers (not churned). The
+  duplicate-ish-rows messiness layer in this warehouse adds
+  another twist — ~0.5% of dim_customers are near-duplicates
+  from a botched import.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at <= ${as_of}
+      AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+  plain_language_spec: |
+    Count of distinct, non-test, non-churned customers with
+    at least one currently-active paid subscription as of the
+    as-of date. Test customers, churned customers, and
+    customers without an active paid subscription (free,
+    trialing, or paused) are excluded. The definition is
+    revenue-aligned — what most teams call "paying customers."
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-02-18"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Did not COUNT(DISTINCT customer_id) — used COUNT(*)
+        on a join with subscriptions, so a customer with
+        multiple active subscriptions counted multiple
+        times. Inflated customer count by ~15% in this
+        warehouse where seat-bundle and add-on subs are
+        common. Retired after a Series B diligence call
+        where the customer count was visibly higher than
+        the SOC2 audit's user-organization count.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily", "weekly", "monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Exclude test customers"
+    - "Exclude churned customers (churned_at IS NULL)"
+    - "At least one active paid subscription"
+    - "COUNT DISTINCT to avoid multi-subscription inflation"
+
+variants:
+  - id: A
+    label: "All rows in dim_customers"
+    sql_template: |
+      SELECT COUNT(*) AS customers
+      FROM dim_customers
+    why_someone_might_pick_this: |
+      The most direct interpretation. "How many customers"
+      → count the customer table.
+    why_governed_disagrees: |
+      Includes test customers (~5% inflation), churned
+      customers (still in the table with `churned_at` set),
+      and the ~0.5% near-duplicate rows from botched
+      imports. Off by ~10-15%. Doesn't gate on
+      subscription state.
+
+  - id: B
+    label: "Distinct paying, non-test, non-churned customers (GOVERNED)"
+    sql_template: |
+      SELECT COUNT(DISTINCT c.customer_id) AS customers
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.churned_at IS NULL
+        AND s.status = 'active'
+        AND s.mrr > 0
+        AND s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+    why_someone_might_pick_this: |
+      The "paying customers right now" definition. Most
+      revenue-aligned reading.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Active customers (any signup, not yet churned)"
+    sql_template: |
+      SELECT COUNT(*) AS customers
+      FROM dim_customers
+      WHERE is_test = false
+        AND churned_at IS NULL
+    why_someone_might_pick_this: |
+      A CSM-aligned definition: "customers who haven't
+      churned." Inclusive of free-tier, trialing, paused,
+      and paying — all "active relationships."
+    why_governed_disagrees: |
+      Includes customers without paid subscriptions (free,
+      trial, paused). Inflates the count by ~20-30% in
+      this warehouse depending on plan-tier mix. The
+      governed definition restricts to paying customers
+      because most stakeholders mean "paying" by default.
+
+  - id: D
+    label: "Customers with any user activity in last 30d"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.customer_id) AS customers
+      FROM dim_users u
+      WHERE u.last_active_at >= ${as_of}::date - INTERVAL '30 days'
+        AND u.last_active_at < ${as_of}
+    why_someone_might_pick_this: |
+      A product team using engagement as the customer
+      definition: "a customer that's actually using the
+      product." Useful for product-led-growth narratives
+      where presence > payment.
+    why_governed_disagrees: |
+      Conflates Active Customers (engagement-based) with
+      Customers (revenue-based). Different stakeholders
+      need different cuts; the governed Customer metric
+      is the revenue-aligned one. Also: doesn't filter
+      test customers, doesn't deduplicate the
+      near-duplicate rows.
+
+  - id: E
+    label: "Distinct paying customers, deduplicated by company name"
+    sql_template: |
+      SELECT COUNT(DISTINCT LOWER(TRIM(c.company_name))) AS customers
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.churned_at IS NULL
+        AND s.status = 'active'
+        AND s.mrr > 0
+    why_someone_might_pick_this: |
+      An analyst aware of the duplicate-ish-rows messiness
+      problem trying to deduplicate. ~0.5% of `dim_customers`
+      have multiple rows for the same company from a
+      botched import; deduplicating by `company_name` is a
+      defensible first attempt.
+    why_governed_disagrees: |
+      Over-deduplicates: legitimate parent-subsidiary
+      relationships ("Acme Corp" and "Acme EMEA Ltd")
+      collapse to one row. Also: company_name has
+      free-text/coded-enum messiness elsewhere — same
+      LOWER+TRIM trick that works on `industry` may not
+      cleanly resolve here. Governed definition relies on
+      `customer_id` distinct count and accepts the
+      ~0.5% duplicate inflation as a known data-quality
+      issue tracked separately.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How many customers do we
+  have?" (paying-vs-any), "Customer count by industry"
+  (forces awareness of `industry` enum/free-text mix),
+  "How many customers did we add this quarter?",
+  "Compare customers vs accounts" (the duplicate-rows
+  trap).
+notes_for_context_blocks: |
+  Baseline B should mention `is_test`, `churned_at`, and
+  optionally hint at the duplicate-import issue.
+  Baseline C's typical Cube measure is
+  `COUNT(DISTINCT customer_id)` filtered to active
+  subscriptions — close to governed but usually missing
+  the test filter.

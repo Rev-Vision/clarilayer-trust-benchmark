@@ -1,0 +1,190 @@
+metric_key: arr
+name: Annual Recurring Revenue (ARR)
+description: |
+  The annualized value of a SaaS company's recurring subscription
+  revenue at a point in time. The single most-tracked SaaS metric,
+  and one of the most version-fraught — almost every company has a
+  v1 (naive sum) that gets retired once it ships dirty data, and a
+  v2/v3 that progressively tighten what counts as "recurring,"
+  "active," and "test." Different teams (Finance, RevOps,
+  Investors, Product) have legitimately different needs for the
+  filter set, which is why this metric drives so many real-world
+  governance disputes.
+
+# The version Baseline D would surface from the production
+# Canonical Metric API. Considered ground truth for the benchmark.
+governed_definition:
+  variant_id: C
+  sql_template: |
+    SELECT SUM(s.mrr) * 12 AS arr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= ${as_of}
+      AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  plain_language_spec: |
+    Sum of `mrr` × 12 across all currently-active, non-test,
+    non-churned customer subscriptions as of the as-of date.
+    Negative `mrr` rows (refund accounting) are excluded — they
+    are not subscription value, they are billing adjustments.
+    `status = 'active'` AND date-window check are both required
+    because the messy warehouse keeps `status = 'active'` rows
+    even after `ended_at` is set.
+
+# Governance metadata — what the live API returns alongside the def.
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-02-10"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Defined as `SUM(mrr) * 12` over `fct_subscriptions` with no
+        filters at all. Inflated by ~7% from negative-MRR refund
+        rows, ~5% from test customers, and ~2% from `status =
+        'active'` rows whose `ended_at` had already passed.
+        Retired 2025-09 after a board-deck number disagreed with
+        the GL by $4M.
+    - version: "v2"
+      reason: |
+        Added `status = 'active'` filter and excluded `mrr < 0`,
+        but still counted test customers because the analyst
+        didn't know `is_test` existed on `dim_customers`. Retired
+        2025-12 when a Series B diligence reviewer caught the
+        ~5% test-account inflation.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Exclude test customers (dim_customers.is_test = false)"
+    - "Exclude churned customers (dim_customers.churned_at IS NULL)"
+    - "Exclude refund-accounting negative MRR (s.mrr > 0)"
+    - "Subscription is currently active by both status AND date window"
+
+# Plausible alternative definitions a competent analyst might pick
+# without governed context. Each is "defensibly wrong" — not a
+# strawman. The benchmark only measures something if Baseline A/B/C
+# could legitimately land here.
+variants:
+  - id: A
+    label: "SUM(mrr) * 12 where status = 'active'"
+    sql_template: |
+      SELECT SUM(mrr) * 12 AS arr
+      FROM fct_subscriptions
+      WHERE status = 'active'
+    why_someone_might_pick_this: |
+      The textbook ARR definition. Every SaaS finance blog and
+      every introductory analytics tutorial defines ARR exactly
+      this way. An analyst reading the schema sees `status =
+      'active'` on `fct_subscriptions` and treats it as
+      authoritative.
+    why_governed_disagrees: |
+      Counts negative-MRR refund rows (~2% of subs in this
+      warehouse), test customers (~5% contamination), and
+      subscriptions whose `status = 'active'` flag is stale
+      because `ended_at` has already passed. Inflates ARR by
+      roughly 7-9% in this dataset.
+
+  - id: B
+    label: "Same as A, excluding test customers"
+    sql_template: |
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst who has noticed the `is_test` column on
+      `dim_customers` adds the obvious filter. This is how most
+      teams' v2 of ARR looks — caught the test-account leak,
+      didn't yet catch the date-window or refund issues.
+    why_governed_disagrees: |
+      Still counts negative-MRR refund rows and stale
+      `status='active'` rows whose subscriptions actually ended.
+      In this warehouse, that's ~3-4% inflation vs governed.
+
+  - id: C
+    label: "Active, non-test, non-churned, positive-MRR subscriptions on date window (GOVERNED)"
+    sql_template: |
+      SELECT SUM(s.mrr) * 12 AS arr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    why_someone_might_pick_this: |
+      An analyst with deep familiarity with the warehouse who
+      has been burned by every other variant. Combines all
+      filter discoveries: status, date window, refund exclusion,
+      test exclusion, churned-customer exclusion.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: D
+    label: "Trailing-30-day revenue × 12"
+    sql_template: |
+      SELECT SUM(amount) * (365.0 / 30) AS arr
+      FROM fct_invoices
+      WHERE paid_at >= ${as_of}::date - INTERVAL '30 days'
+        AND paid_at < ${as_of}
+        AND status = 'paid'
+    why_someone_might_pick_this: |
+      Finance teams that track "annualized run-rate revenue"
+      from the GL rather than the subscription book. Common
+      when the subscription system is considered unreliable —
+      cash actually collected is a defensible source of truth.
+      Some auditors prefer this version.
+    why_governed_disagrees: |
+      Conflates ARR (forward-looking subscription value) with
+      annualized cash receipts. Spikes on annual-prepay months,
+      drops on month-following-prepay months. Doesn't represent
+      "what we'd collect over the next 12 months at today's
+      contract base." Also doesn't filter test-customer
+      invoices, and `paid_at` timezone is mixed in this
+      warehouse (UTC vs America/New_York).
+
+  - id: E
+    label: "Subscription contract value annualized (CARR-style)"
+    sql_template: |
+      SELECT SUM(s.mrr * 12) AS carr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      Some companies — particularly those selling annual
+      prepaid contracts — use Contracted ARR (CARR) as their
+      headline metric. Ignores `status` because contracted
+      value is what's been booked regardless of operational
+      activation state. Reasonable for a board deck framed
+      around bookings.
+    why_governed_disagrees: |
+      Includes contracts in `pending`, `paused`, or other
+      non-active operational states. Mixes contracted value
+      with realized recurring value — not what most
+      stakeholders mean by "ARR" without a CARR qualifier.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our ARR right now?",
+  "What was Q1 ARR?", "ARR by industry tier", "ARR change MoM
+  this fiscal quarter" (fiscal calendar matters), "How is our
+  ARR trending YTD" (timezone + fiscal calendar matter).
+notes_for_context_blocks: |
+  Baseline A: just the schema (analyst sees `mrr`, `status`,
+  has to guess the right filter set). Baseline B: schema plus
+  column comment "mrr: monthly recurring revenue (note:
+  negative values exist for refund accounting)" — leaves the
+  test-customer issue invisible. Baseline C: a Cube measure
+  named `arr` defined as `SUM(mrr) * 12` filtered on
+  `status='active'`, no test-customer awareness.

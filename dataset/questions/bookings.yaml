@@ -1,0 +1,117 @@
+# Test questions for bookings.
+# Governed variant: B — annualized contract value (mrr × 12) of subs that
+# started in the period, excluding test customers and refund-accounting
+# negative-MRR rows. Window is on subscription started_at, not paid_at.
+
+- id: bookings-001
+  metric_key: bookings
+  governed_variant: B
+  question: "What were our bookings in Q1 2026?"
+  expected_sql: |
+    SELECT SUM(s.mrr * 12) AS bookings
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.started_at >= TIMESTAMP '2026-01-01'
+      AND s.started_at < TIMESTAMP '2026-04-01'
+      AND s.mrr > 0
+      AND c.is_test = false
+  expected_value: 14373147.24
+  acceptable_alternatives:
+    - "Equivalent SQL with the same started_at window plus governed filters."
+  unacceptable_variants:
+    - "A — SUM(mrr) without the ×12 annualization (off by 12x)"
+    - "C — invoice-due-date instead of subscription start (cash basis)"
+    - "D — new-logo-only bookings (excludes expansion bookings)"
+    - "E — includes negative-MRR refund rows"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: bookings-002
+  metric_key: bookings
+  governed_variant: B
+  question: "What were our bookings for fiscal year 2025?"
+  expected_sql: |
+    SELECT SUM(s.mrr * 12) AS bookings
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.started_at >= TIMESTAMP '2025-01-01'
+      AND s.started_at < TIMESTAMP '2026-01-01'
+      AND s.mrr > 0
+      AND c.is_test = false
+  expected_value: 51129522.24
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on calendar 2025 window."
+  unacceptable_variants:
+    - "Variant A / C / D / E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: bookings-003
+  metric_key: bookings
+  governed_variant: B
+  question: "What were our bookings in Q4 of fiscal year 2025?"
+  expected_sql: |
+    SELECT SUM(s.mrr * 12) AS bookings
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.started_at >= TIMESTAMP '2025-10-01'
+      AND s.started_at < TIMESTAMP '2026-01-01'
+      AND s.mrr > 0
+      AND c.is_test = false
+  expected_value: 15154020.84
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variant A (SUM(mrr) only, off by 12x)."
+    - "Variant D (new-logo only)."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: bookings-004
+  metric_key: bookings
+  governed_variant: B
+  question: "What were our March 2026 bookings?"
+  expected_sql: |
+    SELECT SUM(s.mrr * 12) AS bookings
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.started_at >= TIMESTAMP '2026-03-01'
+      AND s.started_at < TIMESTAMP '2026-04-01'
+      AND s.mrr > 0
+      AND c.is_test = false
+  expected_value: 4983659.16
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on March 2026 started_at window."
+  unacceptable_variants:
+    - "Variant C (uses paid_at / due_at instead of started_at — different window)."
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: bookings-005
+  metric_key: bookings
+  governed_variant: B
+  question: "Compare February 2026 bookings to March 2026 bookings — what was the change?"
+  expected_sql: |
+    WITH mar AS (
+      SELECT SUM(s.mrr * 12) AS bookings FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at >= TIMESTAMP '2026-03-01'
+        AND s.started_at < TIMESTAMP '2026-04-01'
+        AND s.mrr > 0 AND c.is_test = false
+    ),
+    feb AS (
+      SELECT SUM(s.mrr * 12) AS bookings FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at >= TIMESTAMP '2026-02-01'
+        AND s.started_at < TIMESTAMP '2026-03-01'
+        AND s.mrr > 0 AND c.is_test = false
+    )
+    SELECT mar.bookings - feb.bookings AS mom_change FROM mar, feb
+  expected_value: 585102.36
+  acceptable_alternatives:
+    - "Two governed-variant period queries with the difference computed in any equivalent shape."
+  unacceptable_variants:
+    - "MoM computed using cash-basis bookings (variant C)."
+    - "MoM that excludes expansion (variant D — new-logo-only) on either side."
+  difficulty: hard
+  ambiguity_axis: trend

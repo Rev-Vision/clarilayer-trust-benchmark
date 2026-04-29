@@ -1,0 +1,162 @@
+# Test questions for arr_contraction.
+# Governed variant: B — for each customer who existed at period_start
+# (signup_date < period_start, non-test), compute start-of-period ARR
+# minus end-of-period ARR using temporal-only sub predicates
+# (no s.status filter — that's a current-state column, not historical).
+# mrr > 0 keeps refund-row accounting out. Sum positive contractions.
+# Customers who fully churned in-period contribute their full
+# arr_start (their arr_end is 0). End-exclusive boundary.
+# Annualization at the end.
+#
+# Synthetic-warehouse note: D6's downgrade lifecycle (~7% of long-
+# tenure non-test customers' MRR drops mid-tenure) plus full churn
+# combine to produce non-trivial contraction values across all
+# sampled periods.
+
+- id: arr_contraction-001
+  metric_key: arr_contraction
+  governed_variant: B
+  question: "How much did our existing customers contract in Q1 2026?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-04-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-04-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2026-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+    FROM cust_period
+    WHERE arr_start > 0
+  expected_value: 3167570.40
+  acceptable_alternatives:
+    - "Equivalent SQL with temporal-only predicates (no status filter), end-exclusive boundary, mrr > 0 in each CASE, signup_date < period_start, no c.churned_at IS NULL filter, no arr_end > 0 in the WHERE clause."
+  unacceptable_variants:
+    - "A — sums negative-MRR refund rows + LATERAL-derived deltas; misses downgrade-by-replacement"
+    - "C — keeps status='active' filter inside CASE WHEN; suppresses real contraction"
+    - "D — sums negative-MRR refund rows only"
+    - "E — pre-v2 governed (status='active' + churned_at IS NULL + arr_end > 0); near-zero on this period"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: arr_contraction-002
+  metric_key: arr_contraction
+  governed_variant: B
+  question: "How much did our book contract in fiscal year 2025?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+    FROM cust_period
+    WHERE arr_start > 0
+  expected_value: 3518308.56
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variant E — pre-v2 governed; suppressed by status filter + survivorship."
+    - "Variant A / D — pick up negative-MRR refund rows."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: arr_contraction-003
+  metric_key: arr_contraction
+  governed_variant: B
+  question: "How much did our existing customers contract in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-10-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-10-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-10-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+    FROM cust_period
+    WHERE arr_start > 0
+  expected_value: 2758280.04
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: filter
+
+- id: arr_contraction-004
+  metric_key: arr_contraction
+  governed_variant: B
+  question: "How does our existing-customer contraction in Q1 2026 compare to ARR Expansion in the same period?"
+  expected_sql: |
+    -- Compute Contraction (governed) for Q1 2026 — the comparison
+    -- denominator (Expansion) is exposed via the related metric;
+    -- the question asks for Contraction itself.
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-04-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-04-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2026-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+    FROM cust_period
+    WHERE arr_start > 0
+  expected_value: 3167570.40
+  acceptable_alternatives:
+    - "Equivalent governed-variant Contraction SQL for Q1 2026."
+  unacceptable_variants:
+    - "Variant E — suppressed by historical-period status filter + survivorship."
+    - "Variant A — picks up negative MRR refund rows."
+  difficulty: hard
+  ambiguity_axis: definition

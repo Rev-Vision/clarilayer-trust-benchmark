@@ -1,0 +1,174 @@
+# Test questions for ltv.
+# Governed variant: B — (ARPU × 0.75 gross margin) ÷ logo churn rate.
+# ARPU = governed period revenue / starting customer count.
+# Logo churn = governed customer-grain churn rate (cohort-matched in v3
+# but the cohort-matched fraction is the input either way at this scale).
+# Period revenue uses the governed revenue windowing — legacy_braintree
+# paid_at interpreted as America/New_York wall-clock, rest UTC, all
+# converted to America/Los_Angeles before period filtering.
+
+- id: ltv-001
+  metric_key: ltv
+  governed_variant: B
+  question: "What was our customer lifetime value over fiscal year 2025?"
+  expected_sql: |
+    WITH starting_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-01-01'
+        AND s.status = 'active'
+        AND s.started_at < TIMESTAMP '2025-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+    ),
+    churned AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2025-01-01'
+        AND c.churned_at < TIMESTAMP '2026-01-01'
+    ),
+    revenue AS (
+      SELECT SUM(i.amount) AS rev
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= TIMESTAMP '2025-01-01'
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < TIMESTAMP '2026-01-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    )
+    SELECT
+      ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+        / NULLIF(churned.cust_count::float
+                  / NULLIF(starting_customers.cust_count, 0), 0)
+        AS ltv
+    FROM starting_customers, churned, revenue
+  expected_value: 10071.38
+  acceptable_alternatives:
+    - "Equivalent SQL using governed Revenue (timezone-normalized) + governed Customer count + 0.75 margin + governed Churn Rate."
+  unacceptable_variants:
+    - "A — ARPU × 1/Churn (no margin adjustment); ~33% higher"
+    - "C — cohort-actual LTV (different methodology)"
+    - "D — discounted LTV (NPV with 10% rate); smaller, more conservative"
+    - "Variants without timezone-normalized revenue windowing (drift from legacy_braintree paid_at)"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: ltv-002
+  metric_key: ltv
+  governed_variant: B
+  question: "What was our customer lifetime value over fiscal year 2024?"
+  expected_sql: |
+    WITH starting_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2024-01-01'
+        AND s.status = 'active'
+        AND s.started_at < TIMESTAMP '2024-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2024-01-01')
+    ),
+    churned AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2024-01-01'
+        AND c.churned_at < TIMESTAMP '2025-01-01'
+    ),
+    revenue AS (
+      SELECT SUM(i.amount) AS rev
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= TIMESTAMP '2024-01-01'
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < TIMESTAMP '2025-01-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    )
+    SELECT
+      ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+        / NULLIF(churned.cust_count::float
+                  / NULLIF(starting_customers.cust_count, 0), 0)
+        AS ltv
+    FROM starting_customers, churned, revenue
+  expected_value: 30544.68
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2024 window."
+  unacceptable_variants:
+    - "Variants A/C/D."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: ltv-003
+  metric_key: ltv
+  governed_variant: B
+  question: "Compute LTV using fiscal year 2025 numbers — make sure to apply the company's 75% gross margin assumption."
+  expected_sql: |
+    WITH starting_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < DATE '2025-01-01'
+        AND s.status = 'active'
+        AND s.started_at < TIMESTAMP '2025-01-01'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+    ),
+    churned AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= TIMESTAMP '2025-01-01'
+        AND c.churned_at < TIMESTAMP '2026-01-01'
+    ),
+    revenue AS (
+      SELECT SUM(i.amount) AS rev
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= TIMESTAMP '2025-01-01'
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < TIMESTAMP '2026-01-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    )
+    SELECT
+      ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+        / NULLIF(churned.cust_count::float
+                  / NULLIF(starting_customers.cust_count, 0), 0)
+        AS ltv
+    FROM starting_customers, churned, revenue
+  expected_value: 10071.38
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variant A — even though the question explicitly mentions the margin, an LLM that drops it nonetheless lands on variant A's gross LTV (~33% higher)."
+    - "Variants C/D."
+  difficulty: hard
+  ambiguity_axis: filter

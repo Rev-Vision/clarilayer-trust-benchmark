@@ -1,0 +1,284 @@
+metric_key: arr_contraction
+name: ARR Contraction
+description: |
+  The total dollar decrease in ARR from the existing
+  customer book during a period — downgrades, seat
+  reductions, plan-tier drops, and full churn-to-zero. ARR
+  contraction is the gross negative-movement headline; pair
+  with ARR Expansion to construct net retention bridges.
+  Distinct from Churn Rate (logo loss); Contraction is the
+  revenue-magnitude view including the final-MRR-to-zero
+  step on customers that fully exit. Variant ambiguity
+  centers on whether refund-row accounting flows through,
+  whether status='active' is a temporal predicate (it
+  isn't), and whether full churn is in scope (it is, in the
+  v2 governed definition).
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Temporal-only filters on subscription state. status reflects
+    -- current sub state, not historical period state, so it is
+    -- intentionally absent from the CASE WHEN predicates that
+    -- decide whether a sub was live during period_start /
+    -- period_end. mrr > 0 is kept to exclude refund-row
+    -- accounting artifacts. The c.churned_at IS NULL filter is
+    -- intentionally absent — a customer who was paying during
+    -- the period but later churned is still in scope; their
+    -- contraction shows up as arr_start > 0 → arr_end = 0.
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < ${period_start}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < ${period_end}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+    FROM cust_period
+    WHERE arr_start > 0
+  plain_language_spec: |
+    For every customer who existed at period_start and is not
+    a test customer, compute start-of-period ARR (sum of
+    positive-MRR subscriptions whose started_at < period_start
+    and that ended after or remained open through period_start)
+    minus end-of-period ARR (same shape against period_end).
+    Sum only the positive deltas (non-zero contraction).
+    Annualize at the end. The end-exclusive boundary
+    convention (`< period_end`) avoids start-of-last-day
+    snapshot bugs. Customers who fully churned in-period
+    contribute their full arr_start as contraction (their
+    arr_end is 0). The status filter is intentionally absent —
+    `s.status` reflects the sub's current state, not its
+    state during the period, so filtering on it
+    incorrectly excludes subs that were active during the
+    period but have since transitioned.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `s.status = 'active'` inside the temporal CASE
+        WHEN predicates. Status reflects the current
+        subscription state, not the state during the
+        historical period. A sub that was active during
+        2024 Q1 but has since been cancelled (or downgraded
+        and replaced) was wrongly excluded from the 2024 Q1
+        ARR calculation, suppressing real contraction
+        observable in the warehouse. Also carried
+        `c.churned_at IS NULL` as a survivorship filter — a
+        customer who paid during 2024 Q1 but churned later
+        in 2024 should still appear in the Q1 calculation.
+        Both filters retired in v2.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Customer existed at period_start (signup_date < period_start)"
+    - "Exclude test customers"
+    - "Temporal-only sub predicate: started_at < boundary AND ended_at IS NULL OR > boundary"
+    - "mrr > 0 keeps refund-row accounting out; status filter is intentionally absent"
+    - "End-exclusive boundary (< period_end_+1 day, never <= period_end)"
+
+variants:
+  - id: A
+    label: "Sum of negative MRR deltas across the period"
+    sql_template: |
+      SELECT SUM(LEAST(s.mrr - prev.mrr, 0)) * -12 AS arr_contraction
+      FROM fct_subscriptions s
+      LEFT JOIN LATERAL (
+        SELECT mrr FROM fct_subscriptions s2
+        WHERE s2.customer_id = s.customer_id
+          AND s2.started_at < s.started_at
+        ORDER BY s2.started_at DESC LIMIT 1
+      ) prev ON true
+      WHERE s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+    why_someone_might_pick_this: |
+      Mirror of ARR Expansion variant A. "Contraction =
+      negative MRR delta." First-principles attempt that
+      doesn't filter for customer existence or build a
+      proper period boundary.
+    why_governed_disagrees: |
+      Mixes refund-row accounting artifacts (negative-MRR
+      rows) with real contraction. Often inflates by 2-3x
+      the true number depending on the warehouse's refund
+      density. Doesn't capture mid-tenure downgrade-by-
+      replacement (where the old sub gets ended_at, the new
+      sub appears with lower MRR — both rows have positive
+      MRR, so the LATERAL diff misses the contraction).
+
+  - id: B
+    label: "Existing-customer ARR start minus end, temporal-only filters, end-exclusive (GOVERNED)"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+      FROM cust_period
+      WHERE arr_start > 0
+    why_someone_might_pick_this: |
+      An analyst who has internalized that `status` is a
+      current-state column (not historical), uses temporal-
+      only predicates with end-exclusive boundaries, and
+      includes fully-churned customers in scope so their
+      MRR-to-zero step contributes.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Includes full churn but retains status='active' temporal filter"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at <= ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at <= ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+      FROM cust_period
+      WHERE arr_start > 0
+    why_someone_might_pick_this: |
+      An analyst who removed the `c.churned_at IS NULL`
+      filter (so fully-churned customers are in scope)
+      but kept the `s.status = 'active'` filter inside the
+      CASE WHEN predicates.
+    why_governed_disagrees: |
+      The status filter still suppresses real contraction.
+      A sub that was active during the period but is now
+      `cancelled` (because it was replaced via downgrade or
+      because the customer churned) gets excluded from
+      arr_start — making it look like the customer never
+      had any ARR to lose. Often returns 0 against periods
+      with downgrade activity even though real contraction
+      occurred.
+
+  - id: D
+    label: "Negative-MRR-row sum (refund accounting interpreted as contraction)"
+    sql_template: |
+      SELECT SUM(ABS(s.mrr)) * 12 AS arr_contraction
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.mrr < 0
+        AND s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst noticing the negative-MRR rows in
+      `fct_subscriptions` and reasoning "those are the
+      reductions — that's contraction."
+    why_governed_disagrees: |
+      The negative-MRR rows are refund-accounting artifacts
+      from the billing system, not subscription
+      contractions. They reflect cash adjustments that have
+      no relationship to a customer's ongoing subscription
+      level. Picking up only this signal misses real
+      downgrades (which appear as a new lower-MRR sub
+      replacing a cancelled higher-MRR sub).
+
+  - id: E
+    label: "Status='active' temporal filter + survivorship (PRE-v2 GOVERNED)"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at <= ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at <= ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND c.churned_at IS NULL
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(GREATEST(arr_start - arr_end, 0)) * 12 AS arr_contraction
+      FROM cust_period
+      WHERE arr_start > 0 AND arr_end > 0
+    why_someone_might_pick_this: |
+      An analyst inheriting the v1 governed shape — both
+      historical-period status filter AND survivorship
+      (c.churned_at IS NULL) AND end-of-period non-zero gate.
+    why_governed_disagrees: |
+      Two separate bugs compound:
+      1. status='active' inside the temporal CASE WHEN
+         excludes subs that were active during the period
+         but have since cancelled.
+      2. c.churned_at IS NULL excludes customers who paid
+         during the period but churned later.
+      Both filters retired in v2. Returns near-zero on
+      periods that actually saw real contraction.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How much did our existing
+  book contract last quarter?", "Contraction trend over
+  the year", "Compare expansion vs contraction this
+  fiscal year." Pair with Churn Rate questions to
+  exercise the boundary between the two metrics. With v2
+  governed, contraction includes the churned-customer
+  MRR-to-zero step — the Churn Rate metric counts the
+  customer-loss event itself; Contraction values the
+  revenue impact.
+notes_for_context_blocks: |
+  Baseline C is the dangerous one here — most semantic-
+  layer Cube definitions of "contraction" approximate by
+  summing negative-MRR rows (variant D shape), which
+  isn't the governed reading.

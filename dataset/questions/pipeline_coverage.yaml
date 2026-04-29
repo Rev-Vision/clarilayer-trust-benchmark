@@ -1,0 +1,149 @@
+# Test questions for pipeline_coverage.
+# Governed variant: B — sum of open-opportunity deal values divided by
+# the period bookings target ($5M placeholder). Open = opp_created
+# fired without won/lost/no_decision close before period_end. JSON
+# keys coalesced (snake + camel). Event timestamps normalized via the
+# per-row `timezone` column before comparing to period_end (~30% of
+# fct_events rows are LA wall-clock, the rest UTC).
+
+- id: pipeline_coverage-001
+  metric_key: pipeline_coverage
+  governed_variant: B
+  question: "What was our pipeline coverage going into Q2 of fiscal year 2026?"
+  expected_sql: |
+    WITH open_opps AS (
+      SELECT
+        COALESCE(e.properties_jsonb->>'opp_id',
+                 e.properties_jsonb->>'oppId') AS opp_id,
+        COALESCE(e.properties_jsonb->>'deal_value',
+                 e.properties_jsonb->>'dealValue')::numeric AS deal_value
+      FROM fct_events e
+      WHERE e.event_type = 'opp_created'
+        AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-04-01'
+        AND NOT EXISTS (
+          SELECT 1 FROM fct_events e2
+          WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                         e2.properties_jsonb->>'oppId')
+              = COALESCE(e.properties_jsonb->>'opp_id',
+                         e.properties_jsonb->>'oppId')
+            AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+            AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-04-01'
+        )
+    )
+    SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+    FROM open_opps
+  expected_value: 5.5299
+  acceptable_alternatives:
+    - "Equivalent SQL with NOT EXISTS over follow-up resolution events plus COALESCE on JSON keys plus per-row timezone normalization."
+  unacceptable_variants:
+    - "A — all opp values ever created (3-5x inflation from resolved opps)"
+    - "C — late-stage only (commit + best_case); 30-50% of governed"
+    - "D — probability-weighted (a different methodology)"
+    - "E — camelCase-only JSON path (~40% of opps missed)"
+    - "Variants without timezone-column normalization"
+  difficulty: hard
+  ambiguity_axis: definition
+
+- id: pipeline_coverage-002
+  metric_key: pipeline_coverage
+  governed_variant: B
+  question: "What was our pipeline coverage going into Q1 of fiscal year 2026?"
+  expected_sql: |
+    WITH open_opps AS (
+      SELECT
+        COALESCE(e.properties_jsonb->>'opp_id',
+                 e.properties_jsonb->>'oppId') AS opp_id,
+        COALESCE(e.properties_jsonb->>'deal_value',
+                 e.properties_jsonb->>'dealValue')::numeric AS deal_value
+      FROM fct_events e
+      WHERE e.event_type = 'opp_created'
+        AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-01-01'
+        AND NOT EXISTS (
+          SELECT 1 FROM fct_events e2
+          WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                         e2.properties_jsonb->>'oppId')
+              = COALESCE(e.properties_jsonb->>'opp_id',
+                         e.properties_jsonb->>'oppId')
+            AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+            AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-01-01'
+        )
+    )
+    SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+    FROM open_opps
+  expected_value: 67.8403
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with end-of-FY-2025 cutoff."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+    - "Variants that use a different bookings target than the documented $5M placeholder."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: pipeline_coverage-003
+  metric_key: pipeline_coverage
+  governed_variant: B
+  question: "What was our pipeline coverage at the end of Q3 of fiscal year 2025?"
+  expected_sql: |
+    WITH open_opps AS (
+      SELECT
+        COALESCE(e.properties_jsonb->>'opp_id',
+                 e.properties_jsonb->>'oppId') AS opp_id,
+        COALESCE(e.properties_jsonb->>'deal_value',
+                 e.properties_jsonb->>'dealValue')::numeric AS deal_value
+      FROM fct_events e
+      WHERE e.event_type = 'opp_created'
+        AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2025-10-01'
+        AND NOT EXISTS (
+          SELECT 1 FROM fct_events e2
+          WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                         e2.properties_jsonb->>'oppId')
+              = COALESCE(e.properties_jsonb->>'opp_id',
+                         e.properties_jsonb->>'oppId')
+            AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+            AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2025-10-01'
+        )
+    )
+    SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+    FROM open_opps
+  expected_value: 66.2092
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL at 2025-10-01 cutoff."
+  unacceptable_variants:
+    - "Variant E — camelCase-only JSON path."
+    - "Variant A — counts resolved opps as still open."
+  difficulty: hard
+  ambiguity_axis: filter
+
+- id: pipeline_coverage-004
+  metric_key: pipeline_coverage
+  governed_variant: B
+  question: "What was our pipeline coverage at the end of Q2 of fiscal year 2025?"
+  expected_sql: |
+    WITH open_opps AS (
+      SELECT
+        COALESCE(e.properties_jsonb->>'opp_id',
+                 e.properties_jsonb->>'oppId') AS opp_id,
+        COALESCE(e.properties_jsonb->>'deal_value',
+                 e.properties_jsonb->>'dealValue')::numeric AS deal_value
+      FROM fct_events e
+      WHERE e.event_type = 'opp_created'
+        AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2025-07-01'
+        AND NOT EXISTS (
+          SELECT 1 FROM fct_events e2
+          WHERE COALESCE(e2.properties_jsonb->>'opp_id',
+                         e2.properties_jsonb->>'oppId')
+              = COALESCE(e.properties_jsonb->>'opp_id',
+                         e.properties_jsonb->>'oppId')
+            AND e2.event_type IN ('opp_won', 'opp_lost', 'opp_no_decision')
+            AND (e2.timestamp AT TIME ZONE e2.timezone AT TIME ZONE 'UTC') < TIMESTAMP '2025-07-01'
+        )
+    )
+    SELECT SUM(deal_value) / 5000000.0 AS coverage_ratio
+    FROM open_opps
+  expected_value: 61.4763
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL at 2025-07-01 cutoff."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic

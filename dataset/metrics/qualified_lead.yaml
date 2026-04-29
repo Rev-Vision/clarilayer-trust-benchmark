@@ -1,0 +1,243 @@
+metric_key: qualified_lead
+name: Qualified Lead
+description: |
+  A user or customer who meets the criteria for being
+  "sales-qualified." The most subjective and team-defined
+  metric in the SaaS canon — different organizations use
+  product signals (engagement thresholds), firmographic
+  signals (company size, industry), or sales-stage signals
+  (sales-flagged in the CRM). The Synthetic warehouse models
+  this as a combination of an explicit `lead_qualified` event
+  signal and customer industry. The variant ambiguity reflects
+  how disparate real-world definitions are.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= ${period_start}
+      AND u.created_at < ${period_end}
+      AND u.deleted_at IS NULL
+      AND c.is_test = false
+      AND EXISTS (
+        SELECT 1 FROM fct_events e
+        WHERE e.user_id = u.user_id
+          AND e.event_type = 'lead_qualified'
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              >= u.created_at
+          AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+              < u.created_at + INTERVAL '14 days'
+      )
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+  plain_language_spec: |
+    A new user (created in the period) for whom a
+    `lead_qualified` event fires within their first 14 days,
+    on a non-test customer in one of the four target
+    industries (SaaS, FinTech, eCommerce, Healthcare).
+    Industry is normalized via LOWER+TRIM because the
+    warehouse stores it as a mix of free-text and coded enums
+    (e.g., 'saas' / 'SaaS' / 'Software-as-a-Service'). The
+    `lead_qualified` event is the explicit qualification
+    signal — emitted when product/marketing telemetry crosses
+    the company's documented MQL bar.
+
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: marketing
+  approver: cmo
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `industry IN ('saas', 'fintech', ...)` without
+        the LOWER+TRIM normalization. Missed ~30% of
+        qualifying customers because their `industry` value
+        was logged as 'SaaS', 'Software-as-a-Service', or
+        'fintech' (with whitespace) rather than the canonical
+        lowercase enum. Fixed in v2 after the marketing team
+        compared their MQL count to the CRM's and found the
+        warehouse undercount.
+    - version: "v2"
+      reason: |
+        Used an uncalibrated event-count threshold (≥10
+        events in the first 14 days post-signup) as the
+        engagement gate. Warehouse engagement density doesn't
+        actually support that threshold — observed activity
+        for new users tops out at 5-6 events in the first
+        14 days, so the v2 governed metric was structurally
+        zero across normal periods. Switched to the explicit
+        `lead_qualified` event signal in v3 once the
+        product-marketing instrumentation began emitting it
+        for users crossing the documented MQL bar (≥6% of
+        new users in the last six months).
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["weekly", "monthly", "quarterly"]
+    default_grain: "weekly"
+  canonical_filters:
+    - "Exclude test customers and soft-deleted users"
+    - "Engagement signal: explicit lead_qualified event in first 14 days"
+    - "Industry filter normalized via LOWER(TRIM(industry))"
+
+variants:
+  - id: A
+    label: "Any user created in period"
+    sql_template: |
+      SELECT COUNT(*) AS qualified_leads
+      FROM dim_users
+      WHERE created_at >= ${period_start}
+        AND created_at < ${period_end}
+    why_someone_might_pick_this: |
+      The simplest reading. "Qualified Lead" → "lead" →
+      "user signup." Skips qualification entirely; common
+      first-pass when the analyst hasn't been told what
+      "qualified" means.
+    why_governed_disagrees: |
+      No qualification check at all. Counts every signup
+      including test customers, free-tier no-engagement
+      users, and customers in non-target industries.
+      Returns orders of magnitude more than the governed
+      number.
+
+  - id: B
+    label: "lead_qualified event + target industry, normalized (GOVERNED)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.created_at >= ${period_start}
+        AND u.created_at < ${period_end}
+        AND u.deleted_at IS NULL
+        AND c.is_test = false
+        AND EXISTS (
+          SELECT 1 FROM fct_events e
+          WHERE e.user_id = u.user_id
+            AND e.event_type = 'lead_qualified'
+            AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+                >= u.created_at
+            AND (e.timestamp AT TIME ZONE e.timezone AT TIME ZONE 'UTC')
+                < u.created_at + INTERVAL '14 days'
+        )
+        AND (
+          CASE
+            WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+            ELSE LOWER(TRIM(c.industry))
+          END
+        ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+    why_someone_might_pick_this: |
+      An analyst with full warehouse familiarity: knows
+      `lead_qualified` is the explicit MQL signal in the
+      events stream, normalizes industry, applies the
+      non-test/non-deleted filters.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Engagement-threshold qualification (≥10 events in first 14 days)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.created_at >= ${period_start}
+        AND u.created_at < ${period_end}
+        AND u.last_active_at >= u.created_at
+        AND c.is_test = false
+        AND u.deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM fct_events e
+          WHERE e.user_id = u.user_id
+            AND e.timestamp >= u.created_at
+            AND e.timestamp < u.created_at + INTERVAL '14 days'
+          HAVING COUNT(*) >= 10
+        )
+        AND (
+          CASE
+            WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+            ELSE LOWER(TRIM(c.industry))
+          END
+        ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+    why_someone_might_pick_this: |
+      An analyst who reaches for an inferred-engagement
+      threshold (≥10 events in first 14 days) instead of
+      the explicit `lead_qualified` event. Reasonable when
+      the analyst doesn't know about the dedicated MQL
+      event type.
+    why_governed_disagrees: |
+      Uncalibrated threshold. Warehouse engagement density
+      doesn't support ≥10 events in 14 days for new users
+      (observed max 5-6), so this variant is structurally
+      zero across normal periods. The previous v2 governed
+      definition used this exact shape and was retired
+      precisely for this reason — the threshold didn't
+      match warehouse reality.
+
+  - id: D
+    label: "Sales-flagged qualified users (event-type based)"
+    sql_template: |
+      SELECT COUNT(DISTINCT user_id) AS qualified_leads
+      FROM fct_events
+      WHERE event_type = 'sales_qualified'
+        AND timestamp >= ${period_start}
+        AND timestamp < ${period_end}
+    why_someone_might_pick_this: |
+      A team that operationalizes lead qualification
+      through CRM-fed events: "qualified leads are users
+      flagged by Sales." Direct sales-aligned definition.
+    why_governed_disagrees: |
+      Different signal entirely. The governed metric is
+      marketing-qualified (`lead_qualified` event); the
+      `sales_qualified` event represents a downstream
+      sales-stage confirmation, not the marketing
+      qualification itself. Numerically: typically 30-50% of
+      governed MQLs convert to sales_qualified events, so
+      this variant returns a smaller and time-shifted
+      number.
+
+  - id: E
+    label: "Customer-level qualification (any user on a target-industry customer)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id) AS qualified_leads
+      FROM dim_users u
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.created_at >= ${period_start}
+        AND u.created_at < ${period_end}
+        AND c.is_test = false
+        AND (
+          CASE
+            WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service') THEN 'saas'
+            ELSE LOWER(TRIM(c.industry))
+          END
+        ) IN ('saas', 'fintech', 'ecommerce', 'healthcare')
+    why_someone_might_pick_this: |
+      A team that qualifies at the customer-industry
+      level, not the engagement level. "If they're a SaaS
+      company, every user from there is qualified."
+      Common in account-based marketing.
+    why_governed_disagrees: |
+      Drops the engagement gate entirely. The governed MQL
+      definition requires both "right industry" AND
+      "explicit qualification signal"; this variant counts
+      disengaged sign-ups from target industries as
+      qualified.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How many MQLs last
+  quarter?", "MQL trend by industry" (forces analyst
+  to confront the industry enum issue), "MQL conversion
+  to subscription rate."
+notes_for_context_blocks: |
+  Baseline B's docs should hint at the industry enum
+  inconsistency: "industry: company industry; values may
+  be free-text or coded enums (e.g., 'saas', 'SaaS',
+  'Software-as-a-Service')." Baseline C's typical Cube
+  definition is unlikely to encode the lead_qualified
+  event filter; the governed lift is heavy here.

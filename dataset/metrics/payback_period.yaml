@@ -1,0 +1,292 @@
+metric_key: payback_period
+name: CAC Payback Period
+description: |
+  The number of months it takes to recoup the cost of
+  acquiring a new customer. The standard SaaS efficiency
+  metric — investors want it under 12 months for healthy
+  unit economics. Variant ambiguity centers on the basis
+  (gross profit vs revenue), the time grain (monthly ARPU vs
+  annualized), and whether to include expansion uplift.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Payback = CAC / (Monthly Gross Profit per Customer)
+    -- Monthly gross profit per customer = ARPU_monthly × Margin
+    -- ARPU_monthly = MRR / customers
+    -- All filters are evaluated as-of ${as_of} so the snapshot is
+    -- stable for historical periods (no future churn / future
+    -- subscription leakage).
+    WITH active_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= ${as_of}
+        AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+        AND s.mrr > 0
+        AND s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+    ),
+    mrr_total AS (
+      SELECT SUM(s.mrr) AS total_mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= ${as_of}
+        AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+        AND s.mrr > 0
+        AND s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+    ),
+    new_paying AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= ${as_of}::date - INTERVAL '1 month'
+        AND c.signup_date < ${as_of}
+        AND c.is_test = false
+        AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+        AND s.mrr > 0
+        AND s.started_at <= ${as_of}
+        AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+    )
+    SELECT
+      (300000.0 / NULLIF(new_paying.n, 0))
+        / NULLIF(
+          (mrr_total.total_mrr / NULLIF(active_customers.cust_count, 0))
+            * 0.75, 0)
+        AS payback_months
+    FROM active_customers, mrr_total, new_paying
+  plain_language_spec: |
+    CAC / (Monthly ARPU × Gross Margin). CAC is governed
+    (placeholder $300K monthly S+M / new paying customers).
+    Monthly ARPU is total MRR / active paying customers.
+    Gross Margin = 75%. Reported in months.
+
+governance_metadata:
+  version: "v1"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-03-22"
+  deprecated_versions: []
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Numerator: governed CAC ($300K monthly S+M / new paying)"
+    - "Denominator: monthly ARPU × 75% gross margin"
+    - "Excludes expansion uplift (captures gross acquisition payback)"
+
+variants:
+  - id: A
+    label: "CAC / ARPU (no margin adjustment)"
+    sql_template: |
+      WITH active_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      mrr_total AS (
+        SELECT SUM(s.mrr) AS total_mrr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      new_paying AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${as_of}::date - INTERVAL '1 month'
+          AND c.signup_date < ${as_of}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT
+        (300000.0 / NULLIF(new_paying.n, 0))
+          / NULLIF(mrr_total.total_mrr
+                   / NULLIF(active_customers.cust_count, 0), 0)
+          AS payback_months
+      FROM active_customers, mrr_total, new_paying
+    why_someone_might_pick_this: |
+      The simplest payback formula: CAC / ARPU. Skips the
+      gross-margin adjustment. Common when the analyst
+      doesn't have a margin assumption to apply.
+    why_governed_disagrees: |
+      Returns the gross payback period (cash flow), not
+      the gross-profit payback period (governed). ~25%
+      shorter than governed because it ignores the
+      gross-margin haircut. Mixing the two distorts
+      industry-benchmark comparison.
+
+  - id: B
+    label: "CAC / (ARPU × Margin), monthly basis (GOVERNED)"
+    sql_template: |
+      -- All filters are evaluated as-of ${as_of} so the snapshot is
+      -- stable for historical periods (no future churn / future
+      -- subscription leakage).
+      WITH active_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date <= ${as_of}
+          AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+          AND s.mrr > 0
+          AND s.started_at <= ${as_of}
+          AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+      ),
+      mrr_total AS (
+        SELECT SUM(s.mrr) AS total_mrr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date <= ${as_of}
+          AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+          AND s.mrr > 0
+          AND s.started_at <= ${as_of}
+          AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+      ),
+      new_paying AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${as_of}::date - INTERVAL '1 month'
+          AND c.signup_date < ${as_of}
+          AND c.is_test = false
+          AND (c.churned_at IS NULL OR c.churned_at > ${as_of})
+          AND s.mrr > 0
+          AND s.started_at <= ${as_of}
+          AND (s.ended_at IS NULL OR s.ended_at > ${as_of})
+      )
+      SELECT
+        (300000.0 / NULLIF(new_paying.n, 0))
+          / NULLIF(
+            (mrr_total.total_mrr / NULLIF(active_customers.cust_count, 0))
+              * 0.75, 0)
+          AS payback_months
+      FROM active_customers, mrr_total, new_paying
+    why_someone_might_pick_this: |
+      The standard SaaS payback period formula with
+      gross-margin adjustment.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "CAC / (Annual ARPU × Margin / 12)"
+    sql_template: |
+      WITH active_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      annual_revenue AS (
+        SELECT SUM(i.amount) AS rev
+        FROM fct_invoices i
+        JOIN dim_customers c ON c.customer_id = i.customer_id
+        WHERE i.paid_at >= ${as_of}::date - INTERVAL '1 year'
+          AND i.paid_at < ${as_of}
+          AND i.status = 'paid'
+          AND c.is_test = false
+      ),
+      new_paying AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${as_of}::date - INTERVAL '1 year'
+          AND c.signup_date < ${as_of}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT
+        ((300000.0 * 12) / NULLIF(new_paying.n, 0))
+          / NULLIF(
+            ((annual_revenue.rev / NULLIF(active_customers.cust_count, 0))
+              * 0.75) / 12, 0)
+          AS payback_months
+      FROM active_customers, annual_revenue, new_paying
+    why_someone_might_pick_this: |
+      An analyst computing payback from annual figures
+      and dividing by 12 to express in months. Same
+      calculation, different basis. Avoids the messiness
+      of monthly noise.
+    why_governed_disagrees: |
+      Same numeric result if all inputs are computed
+      consistently — but the lineage is annualized-
+      then-monthly-ed, which inherits annual-revenue's
+      timezone normalization issues (revenue metric
+      v1 had a paid_at timezone bug). Brittle by
+      construction.
+
+  - id: D
+    label: "Naive gross-profit payback (current-state filters)"
+    sql_template: |
+      WITH active_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      mrr_total AS (
+        SELECT SUM(s.mrr) AS total_mrr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      new_paying AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.signup_date >= ${as_of}::date - INTERVAL '1 month'
+          AND c.signup_date < ${as_of}
+          AND c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      )
+      SELECT
+        (300000.0 / NULLIF(new_paying.n, 0))
+          / NULLIF(
+            ((mrr_total.total_mrr
+                / NULLIF(active_customers.cust_count, 0))
+              * 0.75), 0)
+          AS payback_months
+      FROM active_customers, mrr_total, new_paying
+    why_someone_might_pick_this: |
+      Computes payback as CAC / (ARPU × gross_margin), the
+      textbook formula. Doesn't involve as-of snapshots —
+      uses current state of dim_customers and
+      fct_subscriptions (s.status = 'active'). Defensible
+      as the simplest payback formula a competent analyst
+      writes.
+    why_governed_disagrees: |
+      Current-state filters leak future churns into past
+      months — past quarters' payback shifts whenever new
+      churns happen. Governed definition uses temporal
+      predicates relative to ${as_of} instead, so
+      historical snapshots stay stable.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our payback
+  period?", "Payback by customer segment", "Trend
+  trailing 4 quarters."
+notes_for_context_blocks: |
+  Same dependency on hardcoded S+M spend as CAC.
+  Baseline B should expose both the spend constant and
+  the margin assumption.

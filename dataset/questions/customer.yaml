@@ -1,0 +1,161 @@
+# Test questions for customer.
+# Governed variant: B — distinct paying, non-test, non-churned customers
+# with at least one currently-active paid subscription as-of the date.
+
+- id: customer-001
+  metric_key: customer
+  governed_variant: B
+  question: "How many customers do we have as of March 31, 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+  expected_value: 7448
+  acceptable_alternatives:
+    - "Equivalent SQL with the same paying-non-test-non-churned filter set."
+  unacceptable_variants:
+    - "A — COUNT(*) FROM dim_customers (includes test, churned, near-duplicates; ~10-15% over)"
+    - "C — non-test, non-churned with no subscription gate (includes free/trial/paused; ~20-30% over)"
+    - "D — last-30d-engagement; product-led definition, not revenue-aligned"
+    - "E — deduplicated by company_name; collapses parent-subsidiaries"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: customer-002
+  metric_key: customer
+  governed_variant: B
+  question: "How many customers did we have at the end of fiscal year 2025?"
+  expected_sql: |
+    -- Fiscal year 2025 ends 2025-12-31 per governance metadata.
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at <= TIMESTAMP '2025-12-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+  expected_value: 4731
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on December-31 as-of."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+    - "Mid-year as-of (June or other) misinterpreting fiscal year."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: customer-003
+  metric_key: customer
+  governed_variant: B
+  question: "How many SaaS-industry customers do we have as of March 31, 2026?"
+  expected_sql: |
+    -- Industry filter must normalize the free-text/coded-enum mix
+    -- (e.g., 'saas' / 'SaaS' / 'B2B SaaS' / 'Software-as-a-Service'
+    -- all collapse to 'saas' per the qualified_lead governed pattern).
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at <= TIMESTAMP '2026-03-31'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+      AND (
+        CASE
+          WHEN LOWER(TRIM(c.industry)) IN ('saas', 'software-as-a-service', 'b2b saas', 'b2b-saas') THEN 'saas'
+          ELSE LOWER(TRIM(c.industry))
+        END
+      ) = 'saas'
+  expected_value: 1975
+  acceptable_alternatives:
+    - "Equivalent SQL that LOWER+TRIMs the industry column and collapses the saas variants ('saas', 'SaaS', 'Software-as-a-Service', 'b2b saas', 'B2B-SaaS')."
+  unacceptable_variants:
+    - "industry IN ('saas') only — misses ~30%+ of qualifying rows."
+    - "industry = 'SaaS' or any single-form match."
+    - "Variants that drop the paying-subscription gate."
+  difficulty: hard
+  ambiguity_axis: filter
+
+- id: customer-004
+  metric_key: customer
+  governed_variant: B
+  question: "How many customers did we have at the end of June 30, 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at <= TIMESTAMP '2025-06-30'
+      AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-06-30')
+  expected_value: 2057
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on June-30 as-of."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: easy
+  ambiguity_axis: time_logic
+
+- id: customer-005
+  metric_key: customer
+  governed_variant: B
+  question: "How many customers did we add in Q1 2026 who are currently active paying customers?"
+  expected_sql: |
+    -- "Currently active paying" applies the governed Customer filter
+    -- set (active subscription, mrr>0, non-test, non-churned). The
+    -- "added in Q1" restricts the cohort by signup_date.
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.signup_date >= DATE '2026-01-01'
+      AND c.signup_date < DATE '2026-04-01'
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+  expected_value: 192
+  acceptable_alternatives:
+    - "Equivalent SQL filtering signup_date in Q1 plus governed Customer filters."
+  unacceptable_variants:
+    - "Counting all signups including test + free + churned (variant A)."
+    - "Counting customers as of any signup without a paid-subscription gate (variant C)."
+  difficulty: medium
+  ambiguity_axis: filter
+
+- id: customer-006
+  metric_key: customer
+  governed_variant: B
+  question: "How many distinct paying customers do we have right now? Use the canonical customer identifier."
+  expected_sql: |
+    -- The governed Customer-grain key is dim_customers.customer_id.
+    -- Other tables and legacy columns carry alternative spellings:
+    -- dim_customers.cust_id (sparse legacy import, ~50% populated),
+    -- dim_users.account_id (per-user spelling, ~40% populated),
+    -- fct_subscriptions.cust_id (sporadic). Using any of those
+    -- alternatives produces a different and materially smaller count.
+    SELECT COUNT(DISTINCT c.customer_id) AS customers
+    FROM dim_customers c
+    JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+    WHERE c.is_test = false
+      AND c.churned_at IS NULL
+      AND s.status = 'active'
+      AND s.mrr > 0
+  expected_value: 7572
+  acceptable_alternatives:
+    - "Equivalent SQL using dim_customers.customer_id as the canonical key plus governed paying-non-test-non-churned filters."
+  unacceptable_variants:
+    - "COUNT(DISTINCT cust_id) FROM dim_customers — uses the sparse legacy column; returns a much smaller number."
+    - "COUNT(DISTINCT account_id) FROM dim_users with the same filters — different dimension entirely (per-user account spelling)."
+    - "Variants A/C/D/E from the metric catalog."
+  difficulty: medium
+  ambiguity_axis: naming

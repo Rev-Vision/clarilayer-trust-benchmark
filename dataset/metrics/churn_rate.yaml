@@ -1,0 +1,342 @@
+metric_key: churn_rate
+name: Churn Rate
+description: |
+  The percentage of customers (or revenue) lost during a
+  period. Among the most-disputed SaaS metrics because the
+  numerator and denominator both have multiple defensible
+  shapes: customers vs revenue, gross vs net, beginning-of-
+  period vs average-period denominators, and the question of
+  whether downgrades count as churn or contraction. Different
+  audiences (Sales, Finance, Investors) reach for different
+  versions and the answers can differ by 2-3x.
+
+governed_definition:
+  variant_id: A
+  sql_template: |
+    -- Cohort-matched logo churn: of the customers in the
+    -- start-of-period cohort, what fraction churned during
+    -- the period. Mathematically bounded [0, 100%] because
+    -- the numerator is a strict subset of the denominator
+    -- (only customers in the starting cohort can contribute
+    -- to its churn).
+    WITH starting_cohort AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+        AND s.started_at < ${period_start}
+        AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+    ),
+    churned_in_period AS (
+      SELECT c.customer_id
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= ${period_start}
+        AND c.churned_at < ${period_end}
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+       WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+      / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+      AS churn_rate_pct
+  plain_language_spec: |
+    Cohort-matched logo churn rate. Numerator: number of
+    distinct customers from the start-of-period cohort whose
+    `churned_at` fell inside the period (the intersection of
+    the starting cohort with all churns). Denominator: number
+    of distinct non-test customers with at least one
+    subscription live at `period_start` (temporal predicate
+    only — `s.status` is a current-state column and would
+    drop customers who were live at `period_start` but have
+    since churned, mirroring the ARR Expansion / GRR fixes).
+    Reported as a percentage bounded in [0, 100%]. Excludes
+    test customers from both numerator and denominator.
+
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `fct_subscriptions.status = 'cancelled'` as the
+        churn signal instead of `dim_customers.churned_at`.
+        These two columns disagree by ~10% in this
+        warehouse — `status='cancelled'` includes
+        downgrades-to-free and pauses, while `churned_at`
+        only fires on full-customer loss.
+    - version: "v2"
+      reason: |
+        Used a denominator-mismatch shape — counted ANY
+        churn in the period over the start-of-period
+        cohort, without intersecting the two sets. Produces
+        rates above 100% for small early cohorts (FY 2024
+        returned 139.49% in this warehouse: 219 churns over a
+        157-customer starting cohort that the post-2024
+        churns weren't part of). Switched to the
+        cohort-matched shape in v3 so the metric is
+        mathematically bounded by definition.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Use dim_customers.churned_at as authoritative churn signal"
+    - "Exclude test customers from both numerator and denominator"
+    - "Cohort-matched: numerator is the intersection of churned customers and the starting cohort"
+    - "Starting cohort uses temporal-only sub predicate (started_at < period_start AND (ended_at IS NULL OR ended_at > period_start)); status filter intentionally absent — it is a current-state column and would drop customers who were live at period_start but have since churned"
+
+variants:
+  - id: A
+    label: "Cohort-matched logo churn — starting-cohort ∩ churns / starting-cohort (GOVERNED)"
+    sql_template: |
+      WITH starting_cohort AS (
+        SELECT c.customer_id
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      churned_in_period AS (
+        SELECT c.customer_id
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      )
+      SELECT
+        (SELECT COUNT(DISTINCT customer_id) FROM starting_cohort sc
+         WHERE sc.customer_id IN (SELECT customer_id FROM churned_in_period))::float
+        / NULLIF((SELECT COUNT(DISTINCT customer_id) FROM starting_cohort), 0) * 100
+        AS churn_rate_pct
+    why_someone_might_pick_this: |
+      The mathematically-bounded version. Beginning-of-
+      period denominator, customer-count basis, uses the
+      authoritative `churned_at` signal, AND constrains the
+      numerator to the actual cohort being measured.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: B
+    label: "Revenue churn: ARR lost ÷ ARR at period start"
+    sql_template: |
+      WITH starting_arr AS (
+        SELECT SUM(s.mrr) * 12 AS arr_start
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      churned_arr AS (
+        SELECT SUM(s.mrr) * 12 AS arr_lost
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+          AND s.mrr > 0
+      )
+      SELECT (arr_lost / NULLIF(arr_start, 0)) * 100
+        AS churn_rate_pct
+      FROM starting_arr, churned_arr
+    why_someone_might_pick_this: |
+      Investors and CFOs typically prefer revenue-weighted
+      churn — losing one $1M enterprise customer is a much
+      bigger deal than losing 10 $1K SMB customers, and a
+      logo-count metric flattens that. Common in board
+      reporting at venture-backed companies.
+    why_governed_disagrees: |
+      Different unit (revenue, not logos). The benchmark's
+      governed Churn Rate is logo churn; revenue churn is a
+      separate metric (Gross Retention measures the inverse).
+      Mixing the two produces numerically very different
+      answers (often 2-4× apart) for the same period.
+
+  - id: C
+    label: "Status-based churn: subscriptions cancelled ÷ active subs at period start"
+    sql_template: |
+      WITH active_start AS (
+        SELECT COUNT(*) AS sub_count
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE s.status = 'active'
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+          AND c.is_test = false
+      ),
+      cancelled AS (
+        SELECT COUNT(*) AS sub_count
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE s.status = 'cancelled'
+          AND s.ended_at >= ${period_start}
+          AND s.ended_at < ${period_end}
+          AND c.is_test = false
+      )
+      SELECT (cancelled.sub_count::float / NULLIF(active_start.sub_count, 0)) * 100
+        AS churn_rate_pct
+      FROM active_start, cancelled
+    why_someone_might_pick_this: |
+      An analyst reading the schema sees `status =
+      'cancelled'` on `fct_subscriptions` and treats it as
+      the authoritative churn signal. Reasonable choice when
+      the analyst hasn't cross-referenced with
+      `dim_customers.churned_at`.
+    why_governed_disagrees: |
+      `fct_subscriptions.status = 'cancelled'` and
+      `dim_customers.churned_at` disagree by ~10% in this
+      warehouse. The `status='cancelled'` signal includes
+      downgrades-to-free and admin-cancelled subs that
+      didn't represent customer loss. Subscription-level
+      churn is also conceptually different from
+      customer-level churn — a multi-product customer who
+      cancels one product but keeps another is "subscription
+      churn" but not "logo churn."
+
+  - id: D
+    label: "Net churn (gross churn minus expansion)"
+    sql_template: |
+      WITH starting_arr AS (
+        SELECT SUM(s.mrr) * 12 AS arr_start
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+      ),
+      churn_and_contract AS (
+        SELECT SUM(s.mrr) * 12 AS lost_arr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+          AND c.is_test = false
+      ),
+      expansion AS (
+        SELECT SUM(s.mrr) * 12 AS expansion_arr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE s.started_at >= ${period_start}
+          AND s.started_at < ${period_end}
+          AND c.signup_date < ${period_start}
+          AND c.is_test = false
+          AND s.mrr > 0
+      )
+      SELECT
+        (GREATEST(churn_and_contract.lost_arr - expansion.expansion_arr, 0)
+          / NULLIF(starting_arr.arr_start, 0)) * 100 AS churn_rate_pct
+      FROM starting_arr, churn_and_contract, expansion
+    why_someone_might_pick_this: |
+      Net Revenue Retention narratives often invert net
+      churn (NRR = 100% − net churn). An analyst computing
+      NRR backwards lands on this shape. Some board decks
+      explicitly report "net churn" as their headline.
+    why_governed_disagrees: |
+      Confuses Churn Rate (gross customer loss) with Net
+      Revenue Retention (net of expansion). Two distinct
+      metrics; mixing them obscures the underlying churn
+      signal — a company can have high gross churn and high
+      expansion offsetting it, but the gross churn is still
+      the operational concern.
+
+  - id: E
+    label: "Average-denominator churn (start + end average)"
+    sql_template: |
+      WITH starting AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND (c.churned_at IS NULL OR c.churned_at >= ${period_start})
+      ),
+      ending AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_end}
+          AND (c.churned_at IS NULL OR c.churned_at >= ${period_end})
+      ),
+      churned AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS n
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      )
+      SELECT (churned.n::float
+        / NULLIF((starting.n + ending.n) / 2.0, 0)) * 100 AS churn_rate_pct
+      FROM starting, ending, churned
+    why_someone_might_pick_this: |
+      A statistically-trained analyst familiar with actuarial
+      conventions: average-population denominator gives a
+      smoother estimate when populations grow rapidly during
+      the period. Defensible methodologically.
+    why_governed_disagrees: |
+      The standard SaaS convention is beginning-of-period
+      denominator. Average-denominator produces a slightly
+      lower number (typical 0.5-1pp difference), which can
+      look like the company has lower churn than peers
+      using BoP. Inconsistent with industry benchmarks.
+
+  - id: F
+    label: "Naive denominator-mismatch — any churn in period / start-of-period cohort (PRE-v3 GOVERNED)"
+    sql_template: |
+      WITH starting_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.status = 'active'
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      churned_in_period AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      )
+      SELECT
+        churned_in_period.cust_count::float
+          / NULLIF(starting_customers.cust_count, 0) * 100
+          AS churn_rate_pct
+      FROM starting_customers, churned_in_period
+    why_someone_might_pick_this: |
+      An analyst lifting the textbook "churn / starting
+      customers" formula mechanically — counts ANY churn in
+      the period over the start-of-period cohort without
+      intersecting the two sets.
+    why_governed_disagrees: |
+      Denominator mismatch. Numerator includes customers who
+      weren't even in the starting cohort (signed up and
+      churned within the period, or signed up later but
+      churned in-period). Produces rates above 100% for
+      small early cohorts — FY 2024 returns 139.49% in this
+      warehouse because the year's churns include customers
+      who joined after Jan 2024. The pre-v3 governed had
+      this exact bug; v3 introduced cohort-matching to keep
+      the metric mathematically bounded.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What was our churn rate
+  last quarter?" (logo vs revenue ambiguity), "Churn by
+  customer tier", "Compare churn vs gross retention" (the
+  inverse relationship).
+notes_for_context_blocks: |
+  Baseline C's typical Cube measure for churn often
+  expresses one or the other (logo or revenue) — rarely
+  both, and rarely cohort-matched. The governed-vs-Cube
+  gap is whether `churned_at` or `status='cancelled'` is
+  treated as authoritative AND whether the numerator is
+  cohort-anchored.

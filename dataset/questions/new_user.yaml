@@ -1,0 +1,108 @@
+# Test questions for new_user.
+# Governed variant: B — distinct users with created_at in window, on a
+# non-test customer, not soft-deleted. Source of truth is
+# dim_users.created_at.
+
+- id: new_user-001
+  metric_key: new_user
+  governed_variant: B
+  question: "How many new users did we add in March 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2026-03-01'
+      AND u.created_at < TIMESTAMP '2026-04-01'
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 4392
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with the same created_at window plus non-test/non-deleted filters."
+  unacceptable_variants:
+    - "A — created_at only (no test/deletion filter; uses COUNT(*) instead of COUNT DISTINCT)"
+    - "C — first-event-fired user (different operational definition)"
+    - "D — first-user-of-customer (logo-acquisition only, misses seat additions; ~30-50% under)"
+    - "E — gates on paid subscription (excludes free/trial sign-ups)"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: new_user-002
+  metric_key: new_user
+  governed_variant: B
+  question: "How many new users did we add in Q1 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2026-01-01'
+      AND u.created_at < TIMESTAMP '2026-04-01'
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 13446
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q1 2026 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: new_user-003
+  metric_key: new_user
+  governed_variant: B
+  question: "How many new users did we add in fiscal year 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2025-01-01'
+      AND u.created_at < TIMESTAMP '2026-01-01'
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 52977
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on calendar 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: new_user-004
+  metric_key: new_user
+  governed_variant: B
+  question: "How many new users did we add in February 2026?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2026-02-01'
+      AND u.created_at < TIMESTAMP '2026-03-01'
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 4247
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Feb 2026 window."
+  unacceptable_variants:
+    - "Variant D — counts only first-user-of-customer; off by 30-50%."
+    - "Variant E — gates on paid subscription; excludes free/trial signups."
+  difficulty: easy
+  ambiguity_axis: filter
+
+- id: new_user-005
+  metric_key: new_user
+  governed_variant: B
+  question: "How many new users did we add in Q4 of fiscal year 2025?"
+  expected_sql: |
+    SELECT COUNT(DISTINCT u.user_id) AS new_users
+    FROM dim_users u
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.created_at >= TIMESTAMP '2025-10-01'
+      AND u.created_at < TIMESTAMP '2026-01-01'
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  expected_value: 15255
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic

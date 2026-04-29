@@ -1,0 +1,205 @@
+# Test questions for revenue.
+# Governed variant: B — paid invoices over period, non-test customers,
+# with paid_at normalized from {legacy_braintree=America/New_York,
+# else=UTC} into America/Los_Angeles before windowing.
+
+- id: revenue-001
+  metric_key: revenue
+  governed_variant: B
+  question: "What was our revenue in March 2026?"
+  expected_sql: |
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) >= TIMESTAMP '2026-03-01'
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) < TIMESTAMP '2026-04-01'
+      AND i.status = 'paid'
+      AND c.is_test = false
+  expected_value: 776757.47
+  acceptable_alternatives:
+    - "Equivalent SQL with the same paid-status, non-test, timezone-normalized window."
+  unacceptable_variants:
+    - "A — SUM(amount) WHERE paid_at IN window (no status, no test filter; ~3-5% inflation; also no timezone normalization)"
+    - "C — accrual-basis revenue from subscriptions"
+    - "D — billings-style (paid_at OR due_at)"
+    - "E — net of negative-MRR refunds (double-counts the refund offset)"
+    - "Variants ignoring the legacy_braintree timezone (NY-wall-clock paid_at interpreted as UTC)."
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: revenue-002
+  metric_key: revenue
+  governed_variant: B
+  question: "What was our revenue for Q1 2026?"
+  expected_sql: |
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) >= TIMESTAMP '2026-01-01'
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) < TIMESTAMP '2026-04-01'
+      AND i.status = 'paid'
+      AND c.is_test = false
+  expected_value: 2207897.41
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q1 2026 window."
+  unacceptable_variants:
+    - "Variant A (no status / test / TZ filters)."
+    - "Treating Q1 as a non-fiscal-calendar window (e.g. Jan-Apr or Feb-Apr)."
+    - "Variants ignoring legacy_braintree TZ shift."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: revenue-003
+  metric_key: revenue
+  governed_variant: B
+  question: "What was our revenue for fiscal year 2025?"
+  expected_sql: |
+    -- Fiscal year 2025 is calendar 2025 per governance metadata.
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) >= TIMESTAMP '2025-01-01'
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) < TIMESTAMP '2026-01-01'
+      AND i.status = 'paid'
+      AND c.is_test = false
+  expected_value: 9023953.12
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on calendar 2025 window."
+  unacceptable_variants:
+    - "Variant A / D / E."
+    - "Off-by-one fiscal year (e.g. FY ends in March or June)."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: revenue-004
+  metric_key: revenue
+  governed_variant: B
+  question: "What was our revenue for Q4 of fiscal year 2025?"
+  expected_sql: |
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) >= TIMESTAMP '2025-10-01'
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) < TIMESTAMP '2026-01-01'
+      AND i.status = 'paid'
+      AND c.is_test = false
+  expected_value: 2268911.86
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 (Oct-Dec) window."
+  unacceptable_variants:
+    - "Variants without status/test/TZ filters."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: revenue-005
+  metric_key: revenue
+  governed_variant: B
+  question: "What was our revenue for February 2026?"
+  expected_sql: |
+    SELECT SUM(i.amount) AS revenue
+    FROM fct_invoices i
+    JOIN dim_customers c ON c.customer_id = i.customer_id
+    WHERE
+      (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) >= TIMESTAMP '2026-02-01'
+      AND (CASE
+        WHEN i.processor = 'legacy_braintree'
+          THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+        ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+      END) < TIMESTAMP '2026-03-01'
+      AND i.status = 'paid'
+      AND c.is_test = false
+  expected_value: 699632.11
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Feb 2026 window."
+  unacceptable_variants:
+    - "Variants ignoring TZ normalization (legacy_braintree paid_at as-UTC drifts month boundaries)."
+    - "Variants A/D/E."
+  difficulty: hard
+  ambiguity_axis: filter
+
+- id: revenue-006
+  metric_key: revenue
+  governed_variant: B
+  question: "What was the month-over-month change in revenue from February 2026 to March 2026?"
+  expected_sql: |
+    WITH mar AS (
+      SELECT SUM(i.amount) AS rev FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= TIMESTAMP '2026-03-01'
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < TIMESTAMP '2026-04-01'
+        AND i.status = 'paid' AND c.is_test = false
+    ),
+    feb AS (
+      SELECT SUM(i.amount) AS rev FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= TIMESTAMP '2026-02-01'
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < TIMESTAMP '2026-03-01'
+        AND i.status = 'paid' AND c.is_test = false
+    )
+    SELECT mar.rev - feb.rev AS mom_change FROM mar, feb
+  expected_value: 77125.36
+  acceptable_alternatives:
+    - "Two governed-variant period queries with the difference in any equivalent shape."
+  unacceptable_variants:
+    - "MoM computed using variant A (no status / test / TZ filters) on either side; the TZ shift on the legacy_braintree subset alone moves the answer."
+    - "MoM with paid_at interpreted as UTC universally."
+  difficulty: hard
+  ambiguity_axis: trend

@@ -1,0 +1,158 @@
+metric_key: bookings
+name: Bookings
+description: |
+  Total contract value committed by customers in a period —
+  the dollar amount of new and renewal contracts signed,
+  regardless of when the cash is collected or revenue
+  recognized. Sales-organization headline metric. Often
+  conflated with Revenue or ARR Expansion in messy
+  warehouses; the difference matters because Bookings is the
+  forward-looking commit ledger, while Revenue is what's
+  closed.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    SELECT SUM(s.mrr * 12) AS bookings
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.started_at >= ${period_start}
+      AND s.started_at < ${period_end}
+      AND s.mrr > 0
+      AND c.is_test = false
+  plain_language_spec: |
+    Sum of annualized contract value (mrr × 12) for every
+    subscription that started in the period. Includes new
+    business and net-new expansion subs. Excludes test
+    customers and refund-accounting negative MRR. Date window
+    is on `started_at` (the contract effective date), not
+    `paid_at` (cash) or `period of recognition` (accounting).
+
+governance_metadata:
+  version: "v1"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: vp_sales
+  approved_at: "2026-03-01"
+  deprecated_versions: []
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily", "weekly", "monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Exclude test customers"
+    - "Exclude refund-accounting negative MRR"
+    - "Date window is on subscription start date (started_at)"
+
+variants:
+  - id: A
+    label: "SUM(mrr) for subscriptions started in period"
+    sql_template: |
+      SELECT SUM(mrr) AS bookings
+      FROM fct_subscriptions
+      WHERE started_at >= ${period_start}
+        AND started_at < ${period_end}
+    why_someone_might_pick_this: |
+      An analyst conflating MRR with ACV. "Bookings" sounds
+      like "what was sold this month" → "the MRR of contracts
+      that started this month." Misses the annualization that
+      the sales-org definition of Bookings requires.
+    why_governed_disagrees: |
+      Returns monthly contract value, not annualized. A $1K
+      MRR contract counts as $1K Bookings instead of $12K. Off
+      by 12x. Also doesn't exclude test customers or refunds.
+
+  - id: B
+    label: "Annualized contract value of period-started subscriptions, excl. test/refund (GOVERNED)"
+    sql_template: |
+      SELECT SUM(s.mrr * 12) AS bookings
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+        AND s.mrr > 0
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      An analyst who knows ACV is the sales-org unit and
+      annualizes MRR. Filters test and refund noise.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Bookings = Revenue invoiced in period"
+    sql_template: |
+      SELECT SUM(amount) AS bookings
+      FROM fct_invoices
+      WHERE due_at >= ${period_start}
+        AND due_at < ${period_end}
+    why_someone_might_pick_this: |
+      Some companies (especially those that bill annually
+      upfront) operationally treat "Bookings" as "what we
+      invoiced this period." Cash and contract are nearly
+      coincident in annual-prepay businesses.
+    why_governed_disagrees: |
+      Conflates billing with contract commit. A multi-year
+      contract billed annually shows up as full Bookings only
+      in year 1, missing years 2-N. Inversely, a customer
+      whose contract was signed last quarter but invoiced
+      this quarter counts in this quarter's Bookings under
+      this definition — not when they actually committed.
+
+  - id: D
+    label: "New customer bookings only (logo bookings)"
+    sql_template: |
+      SELECT SUM(s.mrr * 12) AS bookings
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+        AND c.signup_date >= ${period_start}
+        AND c.signup_date < ${period_end}
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      A sales team focused on net-new logo acquisition. "How
+      much did we book from brand-new customers this quarter."
+      Reasonable for a new-business sales-leader dashboard.
+    why_governed_disagrees: |
+      Excludes expansion bookings (existing customers
+      upgrading or buying additional plans), which the
+      governed Bookings metric explicitly includes.
+      Underreports total commit by the expansion volume —
+      typically 30-50% of bookings in a healthy SaaS
+      business.
+
+  - id: E
+    label: "All subscription value, gross of churn (full TCV ledger)"
+    sql_template: |
+      SELECT SUM(s.mrr * 12) AS bookings
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      Same as B but includes negative-MRR refund rows. An
+      analyst who knows about the refund convention but
+      reasons "those are also bookings — refunds are
+      negative bookings." Defensible logic for net bookings.
+    why_governed_disagrees: |
+      The governed definition treats negative-MRR refund
+      rows as billing artifacts, not contract commits. Net
+      Bookings (positive minus refund) is a different
+      metric served by a separate definition (not in this
+      catalog); this metric is gross of refund.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What were our bookings last
+  quarter?" (fiscal calendar matters), "New-business
+  bookings this fiscal year" (definition of "new" varies),
+  "Bookings by sales rep" (joins to user/owner data),
+  "Bookings vs revenue this quarter" (forces analyst to
+  pick between the two).
+notes_for_context_blocks: |
+  Baseline B's docs should hint at "ACV = annualized
+  contract value" without specifying whether it's annualized
+  in this warehouse. Baseline C's typical Cube measure for
+  Bookings is `SUM(mrr) * 12` filtered to subs started in
+  the period — usually missing test exclusion.

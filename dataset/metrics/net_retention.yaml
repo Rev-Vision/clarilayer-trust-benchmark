@@ -1,0 +1,268 @@
+metric_key: net_retention
+name: Net Revenue Retention (NRR)
+description: |
+  The percentage of revenue retained from the existing book,
+  inclusive of expansion (and therefore can exceed 100%).
+  The single most-watched SaaS health metric — investors use
+  it as the primary signal of product-market-fit durability.
+  NRR > 120% is "world-class." Variant ambiguity centers on
+  the period basis (annualized vs same-period), the
+  denominator (BoP vs trailing-12m base), and whether to
+  count expansion at customer-level or aggregate-level.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    WITH starting AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active'
+                AND s.mrr > 0
+                AND s.started_at < ${period_start}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+              THEN s.mrr ELSE 0
+            END) AS arr_start
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    ),
+    ending AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.status = 'active'
+                AND s.mrr > 0
+                AND s.started_at < ${period_end}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+              THEN s.mrr ELSE 0
+            END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    )
+    SELECT
+      SUM(e.arr_end)::float
+        / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+    FROM starting s
+    JOIN ending e ON e.customer_id = s.customer_id
+    WHERE s.arr_start > 0
+  plain_language_spec: |
+    For each existing customer (signup before period_start,
+    not test), compute end-of-period MRR. Sum across all
+    such customers and divide by sum of start-of-period
+    MRR. NO cap — expansion legitimately drives this above
+    100%. Excludes new logos (they're tracked via Bookings).
+    Always uses beginning-of-period denominator.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-03-10"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used the trailing-twelve-months base as denominator
+        instead of beginning-of-period. The methodology is
+        defensible but produces numbers ~5pp lower than
+        peer companies' published NRR, distorting investor
+        comparisons. Standardized on BoP after the
+        Series-B board flagged the discrepancy.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["quarterly", "annual"]
+    default_grain: "annual"
+  canonical_filters:
+    - "Existing customers only (signup before period_start)"
+    - "Exclude test customers"
+    - "Beginning-of-period denominator (not trailing average)"
+
+variants:
+  - id: A
+    label: "(Starting ARR + expansion - contraction - churn) / Starting ARR"
+    sql_template: |
+      WITH starting AS (
+        SELECT SUM(s.mrr) AS arr_start
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      expansion AS (
+        SELECT SUM(s.mrr) AS exp_arr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.started_at >= ${period_start}
+          AND s.started_at < ${period_end}
+          AND s.mrr > 0
+      ),
+      churn AS (
+        SELECT SUM(s.mrr) AS lost_arr
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      )
+      SELECT
+        ((starting.arr_start + expansion.exp_arr - churn.lost_arr)
+          / NULLIF(starting.arr_start, 0)) * 100 AS nrr_pct
+      FROM starting, expansion, churn
+    why_someone_might_pick_this: |
+      The "bridge formula" most analysts learn first:
+      NRR = (start + expansion - contraction - churn) /
+      start. Direct application of the formula seen in
+      every SaaS metrics tutorial.
+    why_governed_disagrees: |
+      Difficult to express contraction correctly without
+      double-counting. The bridge formula's contraction
+      term is hard to compute against the messy warehouse
+      because it requires walking subscription history per
+      customer. Most attempts at this formula ship with a
+      stub for contraction (this variant has it implicitly
+      missing), which inflates NRR by 2-5pp.
+
+  - id: B
+    label: "Same-customer end-period ARR ÷ start-period ARR (GOVERNED)"
+    sql_template: |
+      WITH starting AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.status = 'active'
+                  AND s.mrr > 0
+                  AND s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                THEN s.mrr ELSE 0
+              END) AS arr_start
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      ),
+      ending AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.status = 'active'
+                  AND s.mrr > 0
+                  AND s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                THEN s.mrr ELSE 0
+              END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT
+        SUM(e.arr_end)::float
+          / NULLIF(SUM(s.arr_start), 0) * 100 AS net_retention_pct
+      FROM starting s
+      JOIN ending e ON e.customer_id = s.customer_id
+      WHERE s.arr_start > 0
+    why_someone_might_pick_this: |
+      The "cohort-style" definition: same set of customers
+      at start and end. Bypasses the bridge-formula
+      complexity and gives a direct measurement.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Trailing-12-month NRR (denominator is TTM ARR)"
+    sql_template: |
+      WITH ttm AS (
+        SELECT AVG(s.mrr) AS ttm_avg
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at >= ${period_start}::date - INTERVAL '12 months'
+          AND s.started_at < ${period_start}
+      ),
+      ending AS (
+        SELECT SUM(s.mrr) AS arr_end
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at < ${period_end}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+      )
+      SELECT (ending.arr_end / NULLIF(ttm.ttm_avg * 12, 0)) * 100
+        AS net_retention_pct
+      FROM ttm, ending
+    why_someone_might_pick_this: |
+      Some companies use TTM-base NRR for smoothing in
+      high-growth scenarios, which is the rationale for
+      the deprecated v1. Defensible methodology that some
+      analysts still teach.
+    why_governed_disagrees: |
+      Different denominator (TTM rolling average vs
+      beginning-of-period). Produces a different NRR
+      number — typically 3-5pp lower than BoP NRR in a
+      growing company. The governed metric uses BoP for
+      consistency with peer companies.
+
+  - id: D
+    label: "Aggregate-level: end ARR ÷ start ARR (no per-customer cohort)"
+    sql_template: |
+      WITH start_total AS (
+        SELECT SUM(s.mrr) AS total
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      end_total AS (
+        SELECT SUM(s.mrr) AS total
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE c.is_test = false
+          AND s.status = 'active'
+          AND s.mrr > 0
+          AND s.started_at < ${period_end}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+      )
+      SELECT (end_total.total / NULLIF(start_total.total, 0)) * 100
+        AS net_retention_pct
+      FROM start_total, end_total
+    why_someone_might_pick_this: |
+      The simplest possible NRR calculation. "Total book
+      now divided by total book then." Used in
+      first-pass dashboards.
+    why_governed_disagrees: |
+      Includes new logos in the end-period total but not
+      the start-period total — confounds the retention
+      measurement with new-business growth. Inflates NRR
+      proportional to the new-logo bookings rate.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our NRR?", "NRR by
+  industry/tier", "How has NRR trended over the last 4
+  quarters", "Compare NRR vs GRR" (forces understanding of
+  the cap difference).
+notes_for_context_blocks: |
+  Baseline C is the strongest of the three for NRR — Cube
+  semantic-layer files often have a clean NRR measure.
+  The governed lift is mostly the BoP-vs-TTM choice and
+  the same-customer-cohort vs aggregate question.

@@ -1,0 +1,272 @@
+metric_key: gross_margin
+name: Gross Margin
+description: |
+  The percentage of revenue retained after subtracting the
+  cost of delivering the product. The headline efficiency
+  metric — investors use it to grade a SaaS business's
+  scalability, and operators use it to track infrastructure
+  cost discipline. The variant ambiguity is mostly about
+  which COGS source to trust (the warehouse has GAAP and
+  management-accounting versions of the same number, often
+  for the same month), and whether to fall back to a
+  placeholder rate when COGS is missing.
+
+governed_definition:
+  variant_id: A
+  sql_template: |
+    -- fct_cogs-anchored with documented dedup. Per period_month,
+    -- prefer cost_of_goods_sold (GAAP convention) over
+    -- cost_of_revenue (management accounting) when both are
+    -- recorded; fall back to revenue × 0.25 only when no
+    -- fct_cogs row exists for the period (e.g. fiscal periods
+    -- not yet closed in accounting).
+    WITH revenue AS (
+      SELECT i.paid_at, i.amount
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= ${period_start}
+        AND i.paid_at < ${period_end}
+        AND i.status = 'paid'
+        AND c.is_test = false
+    ),
+    period_cogs AS (
+      SELECT period_month,
+        COALESCE(
+          MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+          MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+        ) AS dedupped_cogs
+      FROM fct_cogs
+      WHERE period_month >= ${period_start}
+        AND period_month < ${period_end}
+      GROUP BY period_month
+    ),
+    totals AS (
+      SELECT
+        SUM(amount) AS revenue_total,
+        (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+      FROM revenue
+    )
+    SELECT
+      ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+       / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+    FROM totals
+  plain_language_spec: |
+    (Revenue - COGS) / Revenue × 100. Revenue is governed
+    (per the `revenue` metric: paid invoices, paid status,
+    non-test customers, period-windowed). COGS comes from
+    `fct_cogs` per period_month — when both
+    `cost_of_goods_sold` and `cost_of_revenue` rows exist,
+    the GAAP `cost_of_goods_sold` is preferred. When no
+    `fct_cogs` row exists for the period (e.g. Q1 2026 in
+    this warehouse — accounting hasn't closed those months),
+    fall back to a placeholder 25% of revenue. The
+    fct_cogs-anchored result varies by period because
+    operational COGS has ±30% wobble against the placeholder.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used inline `revenue × 0.25` for COGS regardless of
+        whether `fct_cogs` had data for the period. Returned
+        a constant 75.0 across all closed periods, hiding
+        the real ±30% operational wobble that
+        `fct_cogs.amount` records. Switched to fct_cogs-
+        anchored COGS with the GAAP-preferred dedup
+        (cost_of_goods_sold over cost_of_revenue when both
+        are filed) in v2; the placeholder 25% remains as a
+        fallback for periods accounting hasn't closed yet.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "quarterly"
+  canonical_filters:
+    - "Exclude test customers (governed Revenue is used as denominator)"
+    - "Use governed Revenue definition (paid invoices, paid status, period-windowed)"
+    - "Prefer fct_cogs.cost_of_goods_sold per GAAP convention; fall back to cost_of_revenue, then 25% placeholder"
+
+variants:
+  - id: A
+    label: "fct_cogs-anchored with GAAP dedup, 25% fallback (GOVERNED)"
+    sql_template: |
+      WITH revenue AS (
+        SELECT i.paid_at, i.amount
+        FROM fct_invoices i
+        JOIN dim_customers c ON c.customer_id = i.customer_id
+        WHERE i.paid_at >= ${period_start}
+          AND i.paid_at < ${period_end}
+          AND i.status = 'paid'
+          AND c.is_test = false
+      ),
+      period_cogs AS (
+        SELECT period_month,
+          COALESCE(
+            MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+            MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+          ) AS dedupped_cogs
+        FROM fct_cogs
+        WHERE period_month >= ${period_start}
+          AND period_month < ${period_end}
+        GROUP BY period_month
+      ),
+      totals AS (
+        SELECT
+          SUM(amount) AS revenue_total,
+          (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+        FROM revenue
+      )
+      SELECT
+        ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+         / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+      FROM totals
+    why_someone_might_pick_this: |
+      An analyst who recognizes `fct_cogs` as the
+      authoritative finance source, dedups by source per
+      period_month, and falls back to the placeholder rate
+      only when accounting hasn't closed the period.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: B
+    label: "Naive SUM(fct_cogs.amount) — double-counts dual-source months"
+    sql_template: |
+      WITH revenue AS (
+        SELECT SUM(i.amount) AS rev
+        FROM fct_invoices i
+        JOIN dim_customers c ON c.customer_id = i.customer_id
+        WHERE i.paid_at >= ${period_start}
+          AND i.paid_at < ${period_end}
+          AND i.status = 'paid'
+          AND c.is_test = false
+      ),
+      cogs AS (
+        SELECT SUM(amount) AS cogs_total
+        FROM fct_cogs
+        WHERE period_month >= ${period_start}
+          AND period_month < ${period_end}
+      )
+      SELECT
+        ((revenue.rev - cogs.cogs_total) / NULLIF(revenue.rev, 0)) * 100
+          AS gross_margin_pct
+      FROM revenue, cogs
+    why_someone_might_pick_this: |
+      An analyst who reads `fct_cogs` as a flat fact table
+      and applies `SUM(amount)` without realizing that
+      ~35-40% of months have both `cost_of_revenue` and
+      `cost_of_goods_sold` rows for the same period.
+    why_governed_disagrees: |
+      Double-counts the dual-source months. The schema
+      column comment on `fct_cogs.source` documents this
+      explicitly: "~30%+ of months have BOTH labels
+      populated covering overlapping periods... Naive
+      SUM(amount) double-counts those months — the governed
+      approach is to pick one source and filter, or de-dup
+      per period_month before summing." Drives the margin
+      ~10pp below the governed truth on quarters with heavy
+      dual-filing months.
+
+  - id: C
+    label: "Subscription-based gross margin (MRR-derived denominator)"
+    sql_template: |
+      WITH recurring AS (
+        SELECT SUM(s.mrr) AS mrr_total
+        FROM fct_subscriptions s
+        JOIN dim_customers c ON c.customer_id = s.customer_id
+        WHERE s.status = 'active'
+          AND s.mrr > 0
+          AND c.is_test = false
+      )
+      SELECT
+        ((mrr_total - mrr_total * 0.25) / NULLIF(mrr_total, 0)) * 100
+          AS gross_margin_pct
+      FROM recurring
+    why_someone_might_pick_this: |
+      An investor-deck calculation: "what's our gross margin
+      on the recurring book." Useful for valuation
+      multiples; some board decks present this version
+      explicitly to differentiate from cash-blended margin.
+    why_governed_disagrees: |
+      Computes margin against MRR (run-rate, point-in-time)
+      rather than period revenue (cash flow). The
+      denominator is forward-looking; the numerator (COGS)
+      is implicitly trailing — mixing time bases produces a
+      ratio that doesn't represent any actual period. Also
+      ignores the actual fct_cogs source.
+
+  - id: D
+    label: "Net margin proxy (revenue minus 55% all-cost approximation)"
+    sql_template: |
+      WITH revenue AS (
+        SELECT SUM(amount) AS rev
+        FROM fct_invoices
+        WHERE paid_at >= ${period_start}
+          AND paid_at < ${period_end}
+          AND status = 'paid'
+      )
+      SELECT
+        ((rev - rev * 0.55) / NULLIF(rev, 0)) * 100
+          AS gross_margin_pct
+      FROM revenue
+    why_someone_might_pick_this: |
+      An analyst applying a "fully loaded" 55% cost ratio
+      that includes hosting, support, payment processing,
+      and amortized R&D. Some founders use this informally
+      as their "true margin" number when reasoning about
+      unit economics.
+    why_governed_disagrees: |
+      Conflates Gross Margin with EBITDA / Net Margin. The
+      governed Gross Margin definition uses cost-of-delivery
+      only (sourced from `fct_cogs`), not the fully-loaded
+      operating cost. Returns 45.0 (a constant) regardless
+      of period.
+
+  - id: E
+    label: "Inline 25% COGS placeholder, ignoring fct_cogs (PRE-v2 GOVERNED)"
+    sql_template: |
+      WITH recognized_revenue AS (
+        SELECT SUM(i.amount) AS revenue
+        FROM fct_invoices i
+        JOIN dim_customers c ON c.customer_id = i.customer_id
+        WHERE i.paid_at >= ${period_start}
+          AND i.paid_at < ${period_end}
+          AND i.status = 'paid'
+          AND c.is_test = false
+      )
+      SELECT
+        ((revenue - revenue * 0.25) / NULLIF(revenue, 0)) * 100
+          AS gross_margin_pct
+      FROM recognized_revenue
+    why_someone_might_pick_this: |
+      An analyst inheriting the v1 governed shape — "use
+      the company's standard 25% COGS rate against governed
+      revenue."
+    why_governed_disagrees: |
+      Returns a constant 75.0 across all periods,
+      regardless of actual operational cost movement.
+      `fct_cogs` records the real per-month cost and varies
+      by ±30% against the placeholder; the v2 governed
+      definition uses fct_cogs when present and only falls
+      back to 25% for unclosed periods. The pre-v2 governed
+      had this exact bug — it hid the operational wobble.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our gross margin?",
+  "Margin trend over the last 4 quarters", "Margin by
+  product tier" (requires joining `dim_products`),
+  "Margin this fiscal year vs last." Pair with closed
+  periods (FY 2025) to exercise the fct_cogs reading and
+  unclosed periods (Q1 2026) to exercise the fallback.
+notes_for_context_blocks: |
+  Note for D3/D4: this metric requires fct_cogs (added in
+  D1.5). The 25% fallback rate is the simulation choice
+  for unclosed periods — Baseline B/C context blocks
+  should reflect both the fct_cogs source dedup convention
+  and the placeholder fallback. Baseline C's typical Cube
+  measure is unlikely to dedup by source — it tends to
+  SUM(amount) naively, mirroring variant B.

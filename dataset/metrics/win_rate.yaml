@@ -1,0 +1,255 @@
+metric_key: win_rate
+name: Win Rate
+description: |
+  The percentage of opportunities (or sales-engaged leads)
+  that close as wins. Sales-organization headline metric.
+  The most-disputed dimension is the denominator: only
+  decided opportunities (won + lost), or all opportunities
+  including no-decision/stalled, or weighted by deal size.
+
+  WARNING for D3 ground-truth authors: this metric requires
+  an opportunity/sales-funnel source NOT in the 6-table spec
+  §3.3.1 schema. The variants below approximate using
+  fct_events (sales-stage events) as a proxy. When D1
+  finalizes its schema, this metric may need a proxy table
+  (e.g., a `fct_opportunities` table) or the variants must
+  pull from event-type signals.
+
+governed_definition:
+  variant_id: A
+  sql_template: |
+    -- Approximated using fct_events. Opportunities are
+    -- inferred from `event_type IN ('opp_created',
+    -- 'opp_won', 'opp_lost', 'opp_no_decision')`.
+    -- Win rate = won / (won + lost), excluding no-decision.
+    -- properties_jsonb keys may be snake_case (opp_id) or
+    -- camelCase (oppId); coalesce both forms per
+    -- benchmark-spec §3.3.1 messiness layer.
+    -- Event timestamps are normalized via the per-row
+    -- `timezone` column (~30% of fct_events rows are
+    -- America/Los_Angeles, the rest UTC). Bucketing the raw
+    -- `timestamp` mis-attributes ~30% of events to the
+    -- wrong day/quarter at boundaries.
+    WITH opp_outcomes AS (
+      SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS won,
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS lost
+      FROM fct_events
+      WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= ${period_start}
+        AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < ${period_end}
+        AND event_type IN ('opp_won', 'opp_lost')
+    )
+    SELECT
+      won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+    FROM opp_outcomes
+  plain_language_spec: |
+    Number of opportunities won in the period divided by
+    the total of (won + lost). Excludes no-decision /
+    stalled opportunities from the denominator. Reported
+    as a percentage. Opportunities are inferred from
+    fct_events; properties_jsonb keys may be camelCase or
+    snake_case (this warehouse mixes both — the JSON path
+    expression must match whichever the producer used).
+
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: vp_sales
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `properties_jsonb->>'oppId'` (camelCase)
+        without checking that ~40% of events use
+        `properties_jsonb->>'opp_id'` (snake_case). Missed
+        ~40% of opportunities. Retired after the sales
+        team noticed their pipeline volume looked
+        suspiciously low compared to the CRM.
+    - version: "v2"
+      reason: |
+        Bucketed by raw `fct_events.timestamp` without
+        normalizing via the per-row `timezone` column.
+        ~30% of fct_events rows are stored in
+        America/Los_Angeles wall-clock, the rest UTC; the
+        raw bucket mis-attributes ~30% of events at
+        period boundaries. Tightened in v3 by reading
+        `timestamp AT TIME ZONE timezone AT TIME ZONE
+        'UTC'` for the windowing predicate.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "quarterly"
+  canonical_filters:
+    - "Denominator: won + lost only (excludes no-decision)"
+    - "Numerator: distinct opportunity ids that fired opp_won"
+    - "JSON path expression must handle both camelCase and snake_case (warehouse messiness)"
+    - "Normalize fct_events.timestamp via per-row timezone column before windowing"
+
+variants:
+  - id: A
+    label: "won / (won + lost), JSON paths + timezone normalized (GOVERNED)"
+    sql_template: |
+      -- Coalesce snake_case + camelCase opp_id (warehouse
+      -- messiness layer per benchmark-spec §3.3.1) and
+      -- normalize timestamps via the per-row `timezone`
+      -- column (~30% of fct_events rows are LA, the rest UTC).
+      WITH opp_outcomes AS (
+        SELECT
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                              THEN COALESCE(properties_jsonb->>'opp_id',
+                                            properties_jsonb->>'oppId') END) AS won,
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                              THEN COALESCE(properties_jsonb->>'opp_id',
+                                            properties_jsonb->>'oppId') END) AS lost
+        FROM fct_events
+        WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= ${period_start}
+          AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < ${period_end}
+          AND event_type IN ('opp_won', 'opp_lost')
+      )
+      SELECT
+        won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+      FROM opp_outcomes
+    why_someone_might_pick_this: |
+      The standard sales-org win-rate denominator: decided
+      opportunities only — with the JSON-path coalesce and
+      timezone-column normalization that warehouse messiness
+      requires.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: B
+    label: "won / (won + lost + no_decision)"
+    sql_template: |
+      WITH opp_outcomes AS (
+        SELECT
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                              THEN properties_jsonb->>'opp_id' END) AS won,
+          COUNT(DISTINCT CASE WHEN event_type IN ('opp_lost', 'opp_no_decision')
+                              THEN properties_jsonb->>'opp_id' END) AS not_won
+        FROM fct_events
+        WHERE timestamp >= ${period_start}
+          AND timestamp < ${period_end}
+      )
+      SELECT
+        won::float / NULLIF(won + not_won, 0) * 100 AS win_rate_pct
+      FROM opp_outcomes
+    why_someone_might_pick_this: |
+      A more conservative win-rate methodology: stalled
+      opportunities count as not-won. Some sales orgs
+      prefer this because it captures the "could have
+      been won" pipeline that died without resolution.
+    why_governed_disagrees: |
+      Different denominator (includes no-decision).
+      Returns a smaller win rate (typically 5-10pp
+      lower). Conflates "could have won" with "did win"
+      logic; harder to compare against industry
+      benchmarks which typically use decided-only.
+
+  - id: C
+    label: "won / opp_created (close rate from creation)"
+    sql_template: |
+      WITH opp_counts AS (
+        SELECT
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                              THEN properties_jsonb->>'opp_id' END) AS won,
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_created'
+                              THEN properties_jsonb->>'opp_id' END) AS created
+        FROM fct_events
+        WHERE timestamp >= ${period_start}
+          AND timestamp < ${period_end}
+      )
+      SELECT
+        won::float / NULLIF(created, 0) * 100 AS win_rate_pct
+      FROM opp_counts
+    why_someone_might_pick_this: |
+      A funnel-conversion-style win rate: how many of the
+      opportunities created in the period eventually
+      closed-won. Defensible for marketing-attribution
+      analysis.
+    why_governed_disagrees: |
+      Time-mismatched: "won this quarter" includes opps
+      created in earlier quarters; "created this quarter"
+      may not be decided yet. Mixing those produces a
+      meaningless ratio unless you cohort by creation
+      date and look forward to close — which this
+      variant doesn't.
+
+  - id: D
+    label: "Deal-size-weighted win rate"
+    sql_template: |
+      WITH opp_outcomes AS (
+        SELECT
+          SUM(CASE WHEN event_type = 'opp_won'
+                   THEN (properties_jsonb->>'deal_value')::numeric
+                   ELSE 0 END) AS won_value,
+          SUM(CASE WHEN event_type IN ('opp_won', 'opp_lost')
+                   THEN (properties_jsonb->>'deal_value')::numeric
+                   ELSE 0 END) AS decided_value
+        FROM fct_events
+        WHERE timestamp >= ${period_start}
+          AND timestamp < ${period_end}
+      )
+      SELECT
+        won_value / NULLIF(decided_value, 0) * 100 AS win_rate_pct
+      FROM opp_outcomes
+    why_someone_might_pick_this: |
+      A revenue-leadership-aligned definition: weight by
+      deal size, since one $1M deal matters more than ten
+      $10K deals. Common in enterprise sales analytics.
+    why_governed_disagrees: |
+      Different unit (revenue weight vs opportunity
+      count). The governed Win Rate is logo-count;
+      revenue-weighted is a separate metric (typically
+      called "Revenue Win Rate" or "Weighted Win Rate")
+      and should not be reported as Win Rate without
+      qualifier.
+
+  - id: E
+    label: "won / (won + lost), camelCase JSON path only"
+    sql_template: |
+      WITH opp_outcomes AS (
+        SELECT
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                              THEN properties_jsonb->>'oppId' END) AS won,
+          COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                              THEN properties_jsonb->>'oppId' END) AS lost
+        FROM fct_events
+        WHERE timestamp >= ${period_start}
+          AND timestamp < ${period_end}
+          AND event_type IN ('opp_won', 'opp_lost')
+      )
+      SELECT
+        won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+      FROM opp_outcomes
+    why_someone_might_pick_this: |
+      An analyst with the right denominator logic but
+      wrong JSON key. The warehouse mixes camelCase and
+      snake_case in `properties_jsonb`; an analyst who
+      sampled the data and saw `oppId` writes that
+      version.
+    why_governed_disagrees: |
+      Misses ~40% of opportunities (those logged with
+      `opp_id` snake_case). Returns a numeric win rate
+      that's roughly correct as a percentage but
+      computed over a much smaller population — and
+      vulnerable if the won/lost distribution differs
+      between camelCase and snake_case loggers.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our win rate?",
+  "Win rate by deal size", "Win rate by sales rep"
+  (ambiguous joins to user/customer), "Win rate trend
+  over the year." Pair with Pipeline Coverage.
+notes_for_context_blocks: |
+  Heavy reliance on fct_events.properties_jsonb
+  parsing. Baseline B should mention the
+  camelCase/snake_case mix in `properties_jsonb`
+  without prescribing the resolution. Baseline C's
+  Cube definition for win_rate is unlikely to handle
+  the JSON-key dual-form problem.

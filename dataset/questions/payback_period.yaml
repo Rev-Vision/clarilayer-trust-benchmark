@@ -1,0 +1,173 @@
+# Test questions for payback_period.
+# Governed variant: B — CAC / (monthly ARPU × 0.75 margin).
+# All filters evaluated as-of ${as_of} (using temporal predicates on
+# started_at / ended_at / churned_at) so historical snapshots stay
+# stable. CAC numerator is the $300K monthly placeholder /
+# new-paying-customers-in-prior-month.
+
+- id: payback_period-001
+  metric_key: payback_period
+  governed_variant: B
+  question: "What was our CAC payback period as of March 31, 2026?"
+  expected_sql: |
+    WITH active_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2026-03-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2026-03-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2026-03-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+    ),
+    mrr_total AS (
+      SELECT SUM(s.mrr) AS total_mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2026-03-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2026-03-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2026-03-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+    ),
+    new_paying AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2026-03-31'::date - INTERVAL '1 month'
+        AND c.signup_date < DATE '2026-03-31'
+        AND c.is_test = false
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2026-03-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2026-03-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-03-31')
+    )
+    SELECT
+      (300000.0 / NULLIF(new_paying.n, 0))
+        / NULLIF(
+          (mrr_total.total_mrr / NULLIF(active_customers.cust_count, 0))
+            * 0.75, 0)
+        AS payback_months
+    FROM active_customers, mrr_total, new_paying
+  expected_value: 41.54
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with as-of 2026-03-31 temporal predicates."
+  unacceptable_variants:
+    - "A — no margin (returns ~25% shorter; ~30.9 vs 41.2)"
+    - "C — annualized basis (different lineage; brittle to revenue TZ bugs)"
+    - "D — current-state filters (status='active', no temporal as-of); leaks future churns into past months"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: payback_period-002
+  metric_key: payback_period
+  governed_variant: B
+  question: "What was our payback period as of December 31, 2025?"
+  expected_sql: |
+    WITH active_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2025-12-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    ),
+    mrr_total AS (
+      SELECT SUM(s.mrr) AS total_mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2025-12-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    ),
+    new_paying AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2025-12-31'::date - INTERVAL '1 month'
+        AND c.signup_date < DATE '2025-12-31'
+        AND c.is_test = false
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    )
+    SELECT
+      (300000.0 / NULLIF(new_paying.n, 0))
+        / NULLIF(
+          (mrr_total.total_mrr / NULLIF(active_customers.cust_count, 0))
+            * 0.75, 0)
+        AS payback_months
+    FROM active_customers, mrr_total, new_paying
+  expected_value: 9.4734
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with as-of 2025-12-31 temporal predicates."
+  unacceptable_variants:
+    - "Variant A (no margin)."
+    - "Variant D (current-state filters; produces a different number that drifts as future churns happen)."
+  difficulty: hard
+  ambiguity_axis: time_logic
+
+- id: payback_period-003
+  metric_key: payback_period
+  governed_variant: B
+  question: "What was our CAC payback period as of the end of fiscal year 2025?"
+  expected_sql: |
+    -- Fiscal year 2025 ends 2025-12-31 per governance metadata.
+    WITH active_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2025-12-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    ),
+    mrr_total AS (
+      SELECT SUM(s.mrr) AS total_mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date <= DATE '2025-12-31'
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    ),
+    new_paying AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS n
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.signup_date >= DATE '2025-12-31'::date - INTERVAL '1 month'
+        AND c.signup_date < DATE '2025-12-31'
+        AND c.is_test = false
+        AND (c.churned_at IS NULL OR c.churned_at > TIMESTAMP '2025-12-31')
+        AND s.mrr > 0
+        AND s.started_at <= TIMESTAMP '2025-12-31'
+        AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-12-31')
+    )
+    SELECT
+      (300000.0 / NULLIF(new_paying.n, 0))
+        / NULLIF(
+          (mrr_total.total_mrr / NULLIF(active_customers.cust_count, 0))
+            * 0.75, 0)
+        AS payback_months
+    FROM active_customers, mrr_total, new_paying
+  expected_value: 9.4734
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with as-of 2025-12-31 temporal predicates."
+  unacceptable_variants:
+    - "Variants A/C/D."
+    - "Off-by-fiscal-year window."
+  difficulty: medium
+  ambiguity_axis: time_logic

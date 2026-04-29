@@ -1,0 +1,217 @@
+metric_key: active_user
+name: Active User
+description: |
+  A user counted as "active" within a given time window. The
+  single most-overloaded definition in SaaS analytics —
+  different teams use different thresholds, and the
+  difference matters for retention, expansion, and
+  product-engagement reporting. Whether a user counts depends
+  on threshold choice, customer subscription state, test
+  account exclusion, and event-vs-flag definition of
+  activity.
+
+governed_definition:
+  variant_id: C
+  sql_template: |
+    SELECT COUNT(DISTINCT u.user_id)
+    FROM dim_users u
+    JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+    JOIN dim_customers c ON c.customer_id = u.customer_id
+    WHERE u.last_active_at >= ${period_start}
+      AND u.last_active_at < ${period_end}
+      AND s.status = 'active'
+      AND s.mrr > 0
+      AND s.started_at < ${period_end}
+      AND (s.ended_at IS NULL OR s.ended_at >= ${period_start})
+      AND c.is_test = false
+      AND u.deleted_at IS NULL
+  plain_language_spec: |
+    A unique user with a non-stale `last_active_at` falling
+    inside the requested window, AND whose customer has a
+    currently active paying subscription (mrr > 0), AND not
+    flagged as a test account, AND not soft-deleted. The
+    activity signal is `last_active_at` (broader than
+    event-trigger), the paying-subscription gate filters
+    churned/free customers and refund-row negative-MRR subs,
+    and the test/delete filters remove non-customer noise.
+
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Counted any user with non-null last_active_at,
+        period-windowed but with no subscription gate. Missed
+        bot/test contamination and counted users on churned
+        customers. Retired after a CSM noticed "active users"
+        included accounts whose company had cancelled six
+        months earlier.
+    - version: "v2"
+      reason: |
+        Required an event-trigger (login or
+        action_performed) in the window. Stricter than v1
+        but broke during a 6-week identity-stitching gap
+        in mid-2025 when ~40% of events couldn't be joined
+        to users — DAU dropped by 40% on paper while the
+        product was in fact unaffected. Retired in favor of
+        the more resilient `last_active_at` signal.
+    - version: "v3-pre"
+      reason: |
+        Used `s.status = 'active'` without also requiring
+        `s.mrr > 0`. The warehouse's billing system carries
+        ~2% refund-row subscriptions whose `mrr` is negative
+        but whose `status` remains 'active' — including
+        these in the paying-customer gate overcounts users
+        attached to refund artifacts. Tightened in v3 by
+        adding the `mrr > 0` predicate.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["daily", "weekly", "monthly"]
+    default_grain: "weekly"
+  canonical_filters:
+    - "Subscription must be active during the window AND mrr > 0 (paying)"
+    - "Exclude test customers (is_test = false)"
+    - "Exclude soft-deleted users (deleted_at IS NULL)"
+
+variants:
+  - id: A
+    label: "last_active_at within window"
+    sql_template: |
+      SELECT COUNT(*)
+      FROM dim_users
+      WHERE last_active_at >= ${period_start}
+        AND last_active_at < ${period_end}
+    why_someone_might_pick_this: |
+      It's the obvious column. Anyone reading the schema
+      sees `last_active_at` and assumes that's the answer.
+      No subscription join, no test filter — the most
+      common first-pass query.
+    why_governed_disagrees: |
+      Doesn't gate on the customer's subscription state —
+      counts users on churned customers, which inflates the
+      number. Also doesn't exclude test accounts (~5%
+      contamination) or soft-deleted users.
+
+  - id: B
+    label: "Triggered login or action_performed event in window"
+    sql_template: |
+      SELECT COUNT(DISTINCT user_id)
+      FROM fct_events
+      WHERE event_type IN ('login', 'action_performed')
+        AND timestamp >= ${period_start}
+        AND timestamp < ${period_end}
+    why_someone_might_pick_this: |
+      Strict event-based definition. Many product teams
+      prefer "action proves engagement" over "logged-in
+      counts." Also the natural reading of the warehouse
+      for an analyst encouraged to use `fct_events` as
+      the source of truth for activity.
+    why_governed_disagrees: |
+      Misses users with no events fired during the window
+      who are still legitimately active per the broader
+      business definition (last_active_at is updated by
+      multiple internal pulse sources, not just events).
+      Doesn't filter test accounts. Also: ~3% of
+      `fct_events.user_id` rows are orphans not present in
+      `dim_users` (identity-stitching gap), but this query
+      doesn't join to `dim_users` so it counts those
+      orphans anyway.
+
+  - id: C
+    label: "Active user on a paying customer (mrr > 0), non-test, non-deleted (GOVERNED)"
+    sql_template: |
+      SELECT COUNT(DISTINCT u.user_id)
+      FROM dim_users u
+      JOIN fct_subscriptions s ON s.customer_id = u.customer_id
+      JOIN dim_customers c ON c.customer_id = u.customer_id
+      WHERE u.last_active_at >= ${period_start}
+        AND u.last_active_at < ${period_end}
+        AND s.status = 'active'
+        AND s.mrr > 0
+        AND s.started_at < ${period_end}
+        AND (s.ended_at IS NULL OR s.ended_at >= ${period_start})
+        AND c.is_test = false
+        AND u.deleted_at IS NULL
+    why_someone_might_pick_this: |
+      Filters for paying customers (mrr > 0) and excludes
+      test accounts — reflects revenue-aligned definition
+      of activity. Excludes refund-row subs whose negative
+      MRR can otherwise carry an `active` status from the
+      billing system.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: D
+    label: "≥1 distinct session within window (inferred from event gaps)"
+    sql_template: |
+      WITH sessions AS (
+        SELECT
+          user_id,
+          timestamp AS session_start,
+          LAG(timestamp) OVER (PARTITION BY user_id ORDER BY timestamp)
+            AS prev_event
+        FROM fct_events
+      )
+      SELECT COUNT(DISTINCT user_id)
+      FROM sessions
+      WHERE session_start >= ${period_start}
+        AND session_start < ${period_end}
+        AND (prev_event IS NULL
+             OR session_start - prev_event > INTERVAL '30 minutes')
+    why_someone_might_pick_this: |
+      Session-based definitions feel rigorous; common in
+      product-analytics tools (Mixpanel, Amplitude). The
+      30-minute-gap heuristic is industry-standard.
+    why_governed_disagrees: |
+      Requires session inference logic that's nontrivial
+      and fragile against the messy event timestamps in
+      the warehouse (~30% are in America/Los_Angeles, the
+      rest UTC — which makes the LAG() comparison unreliable
+      across the boundary). Also doesn't gate on
+      subscription state or test customers.
+
+  - id: E
+    label: "Engaged user (last_active_at + min event count)"
+    sql_template: |
+      WITH engaged AS (
+        SELECT u.user_id
+        FROM dim_users u
+        JOIN fct_events e ON e.user_id = u.user_id
+        WHERE u.last_active_at >= ${period_start}
+          AND u.last_active_at < ${period_end}
+          AND e.timestamp >= ${period_start}
+          AND e.timestamp < ${period_end}
+        GROUP BY u.user_id
+        HAVING COUNT(*) >= 5
+      )
+      SELECT COUNT(*) AS active_users
+      FROM engaged
+    why_someone_might_pick_this: |
+      A product team using a "qualified active user"
+      threshold — last_active proves liveness, ≥5 events
+      proves engagement depth. Common in PLG-focused
+      product teams optimizing for true engagement.
+    why_governed_disagrees: |
+      The governed definition is broader (≥1 active signal,
+      not ≥5 events). This variant produces a smaller, more
+      conservative count and drifts further from the
+      governed answer in periods where event volume is
+      low (early in week/month).
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How many active users last
+  quarter?", "MoM change in active users", "active users
+  by tier", "Trend of active users last 6 months". Pair
+  with DAU questions to exercise the daily-vs-window
+  ambiguity.
+notes_for_context_blocks: |
+  Baseline A: just the schema. Baseline B: schema + the
+  column comment "last_active_at: when the user last did
+  anything in the product (best-effort)." Baseline C: a
+  Cube-style measure named `active_users` defined as
+  `COUNT(DISTINCT user_id)` without the subscription join.

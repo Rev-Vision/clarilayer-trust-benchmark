@@ -1,0 +1,7 @@
+# Analysis dependencies (in addition to harness/requirements.txt).
+# pandas + numpy are already pulled in by the harness; matplotlib is added
+# for the figures. Bootstrap resampling is rolled by hand on numpy arrays
+# (see ``_bootstrap_accuracy`` / ``_paired_bootstrap`` in v1_analysis.py).
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.8

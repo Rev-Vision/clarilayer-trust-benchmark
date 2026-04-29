@@ -1,0 +1,197 @@
+# Test questions for gross_margin.
+# Governed variant: A — fct_cogs-anchored with GAAP-preferred dedup,
+# falling back to revenue × 0.25 only when no fct_cogs row exists for
+# the period. Per period_month, COALESCE picks
+# cost_of_goods_sold over cost_of_revenue when both are present.
+#
+# Synthetic-warehouse note: fct_cogs covers 2023-01 through 2025-12.
+# Periods entirely after 2025-12 (e.g. Q1 2026, March 2026) fall
+# through to the 25% placeholder and return exactly 75.0. Periods
+# inside the closed range (FY 2025, Q4 2025) use fct_cogs and produce
+# the operational ±30% wobble — different fixed numbers per period.
+#
+# Ambiguity axes:
+#   - definition (which COGS basis: dedupped fct_cogs vs naive sum
+#     vs 25% inline placeholder vs 55% fully-loaded)
+#   - filter (test-customer inclusion in revenue denominator)
+#   - time logic (period interpretation; closed vs unclosed periods)
+
+- id: gross_margin-001
+  metric_key: gross_margin
+  governed_variant: A
+  question: "What was our gross margin in Q1 2026?"
+  expected_sql: |
+    WITH revenue AS (
+      SELECT i.paid_at, i.amount
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= TIMESTAMP '2026-01-01'
+        AND i.paid_at < TIMESTAMP '2026-04-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    ),
+    period_cogs AS (
+      SELECT period_month,
+        COALESCE(
+          MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+          MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+        ) AS dedupped_cogs
+      FROM fct_cogs
+      WHERE period_month >= DATE '2026-01-01'
+        AND period_month < DATE '2026-04-01'
+      GROUP BY period_month
+    ),
+    totals AS (
+      SELECT
+        SUM(amount) AS revenue_total,
+        (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+      FROM revenue
+    )
+    SELECT
+      ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+       / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+    FROM totals
+  expected_value: 75.0
+  acceptable_alternatives:
+    - "Equivalent SQL using fct_cogs with GAAP-preferred dedup; for Q1 2026 specifically (no fct_cogs rows yet), the 25% fallback is what governs."
+  unacceptable_variants:
+    - "B — naive SUM(fct_cogs.amount); same fallback applies for Q1 2026 because no rows are in scope, so this returns 75.0 here too — but the analyst who hasn't dedupped is structurally wrong"
+    - "C — MRR-based denominator (mismatched time bases)"
+    - "D — 55% fully-loaded cost (returns 45.0)"
+    - "E — pre-v2 governed inline-25% placeholder; same value for Q1 2026 by coincidence but wrong shape"
+  difficulty: easy
+  ambiguity_axis: definition
+
+- id: gross_margin-002
+  metric_key: gross_margin
+  governed_variant: A
+  question: "What was our gross margin for fiscal year 2025?"
+  expected_sql: |
+    WITH revenue AS (
+      SELECT i.paid_at, i.amount
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= TIMESTAMP '2025-01-01'
+        AND i.paid_at < TIMESTAMP '2026-01-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    ),
+    period_cogs AS (
+      SELECT period_month,
+        COALESCE(
+          MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+          MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+        ) AS dedupped_cogs
+      FROM fct_cogs
+      WHERE period_month >= DATE '2025-01-01'
+        AND period_month < DATE '2026-01-01'
+      GROUP BY period_month
+    ),
+    totals AS (
+      SELECT
+        SUM(amount) AS revenue_total,
+        (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+      FROM revenue
+    )
+    SELECT
+      ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+       / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+    FROM totals
+  expected_value: 73.3738
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 — fct_cogs covers all 12 months, so this exercises the dedup logic, not the fallback."
+  unacceptable_variants:
+    - "B — naive SUM(fct_cogs.amount) — produces a margin ~10pp below the governed truth in FY 2025 because of the dual-source months."
+    - "D — 55% cost (returns 45.0)."
+    - "E — pre-v2 inline 25% placeholder (returns 75.0; misses the operational wobble that fct_cogs records)."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: gross_margin-003
+  metric_key: gross_margin
+  governed_variant: A
+  question: "What was our gross margin in March 2026?"
+  expected_sql: |
+    WITH revenue AS (
+      SELECT i.paid_at, i.amount
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= TIMESTAMP '2026-03-01'
+        AND i.paid_at < TIMESTAMP '2026-04-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    ),
+    period_cogs AS (
+      SELECT period_month,
+        COALESCE(
+          MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+          MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+        ) AS dedupped_cogs
+      FROM fct_cogs
+      WHERE period_month >= DATE '2026-03-01'
+        AND period_month < DATE '2026-04-01'
+      GROUP BY period_month
+    ),
+    totals AS (
+      SELECT
+        SUM(amount) AS revenue_total,
+        (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+      FROM revenue
+    )
+    SELECT
+      ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+       / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+    FROM totals
+  expected_value: 75.0
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on March 2026 — exercises the 25% fallback since accounting hasn't closed the period."
+  unacceptable_variants:
+    - "Variant D (55% cost)."
+    - "Variants without the paid-status filter."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: gross_margin-004
+  metric_key: gross_margin
+  governed_variant: A
+  question: "What was our gross margin in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH revenue AS (
+      SELECT i.paid_at, i.amount
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= TIMESTAMP '2025-10-01'
+        AND i.paid_at < TIMESTAMP '2026-01-01'
+        AND i.status = 'paid'
+        AND c.is_test = false
+    ),
+    period_cogs AS (
+      SELECT period_month,
+        COALESCE(
+          MAX(CASE WHEN source = 'cost_of_goods_sold' THEN amount END),
+          MAX(CASE WHEN source = 'cost_of_revenue'    THEN amount END)
+        ) AS dedupped_cogs
+      FROM fct_cogs
+      WHERE period_month >= DATE '2025-10-01'
+        AND period_month < DATE '2026-01-01'
+      GROUP BY period_month
+    ),
+    totals AS (
+      SELECT
+        SUM(amount) AS revenue_total,
+        (SELECT SUM(dedupped_cogs) FROM period_cogs) AS cogs_total
+      FROM revenue
+    )
+    SELECT
+      ((revenue_total - COALESCE(cogs_total, revenue_total * 0.25))
+       / NULLIF(revenue_total, 0)) * 100 AS gross_margin_pct
+    FROM totals
+  expected_value: 73.6866
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 — fct_cogs has rows for Oct-Dec 2025, so this exercises the dedup logic."
+  unacceptable_variants:
+    - "Variant B (naive SUM) returns ~64% — the dual-source double-counting hits Oct-Dec 2025 hard."
+    - "Variant D — 55% cost (returns 45.0)."
+    - "Variant E — pre-v2 inline 25% placeholder (returns 75.0)."
+  difficulty: easy
+  ambiguity_axis: time_logic

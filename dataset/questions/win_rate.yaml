@@ -1,0 +1,126 @@
+# Test questions for win_rate.
+# Governed variant: A — won / (won + lost), where opp_id is read via
+# COALESCE(properties_jsonb->>'opp_id', properties_jsonb->>'oppId') to
+# handle warehouse JSON-key messiness (50/50 snake/camel) AND event
+# timestamps are normalized via the per-row `timezone` column
+# (`fct_events.timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC'`)
+# before windowing — ~30% of rows are stored in America/Los_Angeles
+# wall-clock, the rest UTC.
+
+- id: win_rate-001
+  metric_key: win_rate
+  governed_variant: A
+  question: "What was our sales win rate in Q1 2026?"
+  expected_sql: |
+    WITH opp_outcomes AS (
+      SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS won,
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS lost
+      FROM fct_events
+      WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= TIMESTAMP '2026-01-01'
+        AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-04-01'
+        AND event_type IN ('opp_won', 'opp_lost')
+    )
+    SELECT won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+    FROM opp_outcomes
+  expected_value: 62.3886
+  acceptable_alternatives:
+    - "Equivalent SQL with COALESCE-on-JSON-keys + per-row timezone-normalized window + won/(won+lost) denominator."
+  unacceptable_variants:
+    - "B — won/(won+lost+no_decision); 5-10pp lower"
+    - "C — won/opp_created; time-mismatched"
+    - "D — deal-size-weighted (revenue unit)"
+    - "E — camelCase-only JSON path; misses ~40% of opps"
+    - "Variants without timezone-column normalization — mis-attribute ~30% of events at boundaries"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: win_rate-002
+  metric_key: win_rate
+  governed_variant: A
+  question: "What was our win rate in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH opp_outcomes AS (
+      SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS won,
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS lost
+      FROM fct_events
+      WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= TIMESTAMP '2025-10-01'
+        AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-01-01'
+        AND event_type IN ('opp_won', 'opp_lost')
+    )
+    SELECT won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+    FROM opp_outcomes
+  expected_value: 61.7793
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 window."
+  unacceptable_variants:
+    - "Variants B/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: win_rate-003
+  metric_key: win_rate
+  governed_variant: A
+  question: "What was our sales win rate over fiscal year 2025?"
+  expected_sql: |
+    WITH opp_outcomes AS (
+      SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS won,
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS lost
+      FROM fct_events
+      WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= TIMESTAMP '2025-01-01'
+        AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < TIMESTAMP '2026-01-01'
+        AND event_type IN ('opp_won', 'opp_lost')
+    )
+    SELECT won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+    FROM opp_outcomes
+  expected_value: 62.0197
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variants B/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: win_rate-004
+  metric_key: win_rate
+  governed_variant: A
+  question: "What was our win rate in Q4 of fiscal year 2024?"
+  expected_sql: |
+    WITH opp_outcomes AS (
+      SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_won'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS won,
+        COUNT(DISTINCT CASE WHEN event_type = 'opp_lost'
+                            THEN COALESCE(properties_jsonb->>'opp_id',
+                                          properties_jsonb->>'oppId') END) AS lost
+      FROM fct_events
+      WHERE (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') >= TIMESTAMP '2024-10-01'
+        AND (timestamp AT TIME ZONE timezone AT TIME ZONE 'UTC') < TIMESTAMP '2025-01-01'
+        AND event_type IN ('opp_won', 'opp_lost')
+    )
+    SELECT won::float / NULLIF(won + lost, 0) * 100 AS win_rate_pct
+    FROM opp_outcomes
+  expected_value: 62.3631
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2024 window."
+  unacceptable_variants:
+    - "Variants B/C/D."
+    - "E — camelCase-only JSON path; would return a different number computed over a smaller population."
+    - "Variants without timezone-column normalization."
+  difficulty: hard
+  ambiguity_axis: filter

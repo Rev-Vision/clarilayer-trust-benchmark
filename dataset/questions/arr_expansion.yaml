@@ -1,0 +1,160 @@
+# Test questions for arr_expansion.
+# Governed variant: B (v3) — for each customer existing at period_start
+# (signup before period_start, non-test), compute end-of-period MRR
+# minus start-of-period MRR. Sum positive deltas only. Annualize at the
+# end. Excludes new logos (signup_date in period) entirely.
+#
+# Definitional refresh (CR Major #2, 2026-04-25): drop status='active'
+# from temporal CASE WHEN predicates (status reflects current sub state,
+# not historical period state — keeping it suppresses real expansion on
+# quarters with downgrade-replacement activity). Mirror of arr_contraction
+# v2 fix and gross_retention v2 fix.
+#
+# Cohort gate: arr_end > 0 (not arr_start > 0). Customers who fully
+# churned mid-period contribute zero expansion against arr_end = 0;
+# expansion attaches to the period_end book.
+#
+# End-exclusive boundary convention (prior CR Major): use < next_period_start
+# instead of <= last_day_of_period for the period_end snapshot.
+
+- id: arr_expansion-001
+  metric_key: arr_expansion
+  governed_variant: B
+  question: "How much did our existing customer book expand in Q1 2026?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-04-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-04-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2026-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+    FROM cust_period
+    WHERE arr_end > 0
+  expected_value: 2368891.08
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL with the same existing-customer cohort, temporal-only sub predicates (no status filter), positive-delta filter, ×12 annualization, end-exclusive boundary, and arr_end > 0 gate."
+  unacceptable_variants:
+    - "A — sums positive MRR deltas across all subs; counts new-logo bookings as expansion (~40-60% inflation)"
+    - "C — invoice-based expansion; conflates cash flow with subscription value change"
+    - "D — net ARR change (positive deltas plus negative deltas, including fully-churned customers' losses); a different metric (net expansion) — gross expansion is positive deltas only"
+    - "E — pre-v3 governed shape with status='active' inside the temporal CASE WHEN (suppresses real expansion on quarters with downgrade-replacement activity)"
+    - "Variants using <= TIMESTAMP 'last_day_of_period' instead of < next_period_start (off by start-of-last-day snapshot)"
+  difficulty: medium
+  ambiguity_axis: definition
+
+- id: arr_expansion-002
+  metric_key: arr_expansion
+  governed_variant: B
+  question: "How much did our existing book expand in Q4 of fiscal year 2025?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-10-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-10-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-10-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+    FROM cust_period
+    WHERE arr_end > 0
+  expected_value: 2216265.24
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q4 2025 cohort window."
+  unacceptable_variants:
+    - "Variant A (counts new-logo Q4-2025 signups as expansion)."
+    - "Variant C / D / E."
+  difficulty: medium
+  ambiguity_axis: time_logic
+
+- id: arr_expansion-003
+  metric_key: arr_expansion
+  governed_variant: B
+  question: "How much did the existing customer book expand in fiscal year 2025?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2026-01-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2026-01-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-01-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+    FROM cust_period
+    WHERE arr_end > 0
+  expected_value: 2167443.48
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on FY 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+    - "Variants without the existing-customer (signup < period_start) filter."
+  difficulty: hard
+  ambiguity_axis: filter
+
+- id: arr_expansion-004
+  metric_key: arr_expansion
+  governed_variant: B
+  question: "How much did the existing book expand in Q3 of fiscal year 2025?"
+  expected_sql: |
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-07-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-07-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < TIMESTAMP '2025-10-01'
+                AND (s.ended_at IS NULL OR s.ended_at > TIMESTAMP '2025-10-01')
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false AND c.signup_date < DATE '2025-07-01'
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+    FROM cust_period
+    WHERE arr_end > 0
+  expected_value: 1733675.04
+  acceptable_alternatives:
+    - "Equivalent governed-variant SQL on Q3 2025 window."
+  unacceptable_variants:
+    - "Variants A/C/D/E."
+  difficulty: medium
+  ambiguity_axis: time_logic

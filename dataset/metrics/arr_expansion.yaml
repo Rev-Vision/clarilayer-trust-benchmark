@@ -1,0 +1,308 @@
+metric_key: arr_expansion
+name: ARR Expansion
+description: |
+  The total dollar increase in ARR from existing customers
+  during a period — upgrades, seat additions, plan tier
+  changes upward, and any other positive movement on the
+  active book that isn't a brand-new logo. Critical for
+  measuring net-revenue-retention efficiency and the value
+  of the existing-customer growth motion. Frequently
+  conflated with new-business bookings or with raw
+  positive-MRR-delta. Variant ambiguity centers on which
+  subscription state transitions count as expansion,
+  whether status='active' is a temporal predicate (it
+  isn't), and whether end-of-period customers who fully
+  churned mid-period should still be counted (they
+  shouldn't — there is no "expansion" to attribute when
+  arr_end is zero).
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- Mirror of arr_contraction: temporal-only filters on
+    -- subscription state. status reflects current sub state,
+    -- not historical period state, so it is intentionally
+    -- absent from the CASE WHEN predicates that decide
+    -- whether a sub was live during period_start /
+    -- period_end. mrr > 0 is kept to exclude refund-row
+    -- accounting artifacts. End-exclusive boundary
+    -- convention. Filters arr_end > 0 (not arr_start > 0):
+    -- expansion attaches to customers who exist at
+    -- period_end with positive ARR — a customer who fully
+    -- churned mid-period contributes zero expansion even if
+    -- arr_start was positive.
+    WITH cust_period AS (
+      SELECT
+        c.customer_id,
+        SUM(CASE
+              WHEN s.started_at < ${period_start}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_start,
+        SUM(CASE
+              WHEN s.started_at < ${period_end}
+                AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                AND s.mrr > 0
+              THEN s.mrr ELSE 0 END) AS arr_end
+      FROM dim_customers c
+      LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+      GROUP BY c.customer_id
+    )
+    SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+    FROM cust_period
+    WHERE arr_end > 0
+  plain_language_spec: |
+    For every customer who existed at period_start and is not
+    a test customer, compute end-of-period ARR (sum of
+    positive-MRR subscriptions whose started_at < period_end
+    and that ended after or remained open through period_end)
+    minus start-of-period ARR (same shape against
+    period_start). Sum only the positive deltas (non-zero
+    expansion). Annualize at the end. The end-exclusive
+    boundary convention (`< period_end`) avoids start-of-
+    last-day snapshot bugs. Filter on arr_end > 0 so
+    customers who fully churned mid-period (arr_end = 0)
+    do not contribute — there is no expansion to attribute
+    against an absent end-of-period book. The status filter
+    is intentionally absent — `s.status` reflects the sub's
+    current state, not its state during the period, so
+    filtering on it incorrectly excludes subs that were
+    active during the period but have since transitioned.
+
+governance_metadata:
+  version: "v3"
+  lifecycle_status: APPROVED
+  owner_team: revops
+  approver: head_of_revops
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used `SUM(positive mrr changes)` over the
+        subscription history without filtering by customer
+        existence at period start, which counted new-logo
+        bookings as expansion. Retired after a quarterly
+        review where Sales claimed expansion was 40% of
+        new-bookings — a structural impossibility caught by
+        the CFO.
+    - version: "v2"
+      reason: |
+        Used `s.status = 'active'` inside the temporal CASE
+        WHEN predicates. Status reflects the current
+        subscription state, not the state during the
+        historical period — a sub that was active during
+        2024 Q1 but has since cancelled (or downgraded and
+        replaced) was wrongly excluded from the 2024 Q1
+        ARR calculation, suppressing real expansion
+        observable in the warehouse on quarters with
+        downgrade activity. Same definitional bug fixed in
+        v2 of arr_contraction and v2 of gross_retention;
+        arr_expansion was missed in that pass and is
+        retired here in v3.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly", "quarterly", "annual"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Customer existed at period_start (signup_date < period_start)"
+    - "Exclude test customers"
+    - "Temporal-only sub predicate: started_at < boundary AND (ended_at IS NULL OR ended_at > boundary)"
+    - "mrr > 0 keeps refund-row accounting out; status filter is intentionally absent"
+    - "End-exclusive boundary (< period_end, never <= period_end)"
+    - "Only positive deltas count (contraction has its own metric)"
+    - "Filter arr_end > 0 — fully-churned customers contribute zero expansion"
+
+variants:
+  - id: A
+    label: "Sum of positive MRR deltas across all subscription rows"
+    sql_template: |
+      SELECT SUM(GREATEST(s.mrr - prev.mrr, 0)) * 12 AS arr_expansion
+      FROM fct_subscriptions s
+      LEFT JOIN LATERAL (
+        SELECT mrr FROM fct_subscriptions s2
+        WHERE s2.customer_id = s.customer_id
+          AND s2.started_at < s.started_at
+        ORDER BY s2.started_at DESC LIMIT 1
+      ) prev ON true
+      WHERE s.started_at >= ${period_start}
+        AND s.started_at < ${period_end}
+    why_someone_might_pick_this: |
+      An analyst reasoning "expansion = positive change in
+      what a customer pays." Walks subscription history,
+      finds positive MRR deltas, sums them. Reasonable
+      first-principles attempt.
+    why_governed_disagrees: |
+      Counts a brand-new customer's first subscription as
+      `mrr - 0 = mrr`, which lands in the expansion bucket
+      instead of the new-logo bucket. Inflates ARR Expansion
+      by the volume of new-customer bookings — usually
+      40-60% of the headline number.
+
+  - id: B
+    label: "Existing-customer ARR end minus start, temporal-only filters, end-exclusive (GOVERNED)"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+      FROM cust_period
+      WHERE arr_end > 0
+    why_someone_might_pick_this: |
+      An analyst who has internalized that `status` is a
+      current-state column (not historical), uses temporal-
+      only predicates with end-exclusive boundaries, filters
+      new logos, takes positive deltas only, and gates on
+      arr_end > 0 so fully-churned customers don't claim
+      expansion against an empty end-of-period book.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Sum of upgrade-event invoice amounts in the period"
+    sql_template: |
+      SELECT SUM(amount) * 12 AS arr_expansion
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE i.paid_at >= ${period_start}
+        AND i.paid_at < ${period_end}
+        AND i.status = 'paid'
+        AND i.amount > 0
+        AND c.is_test = false
+        AND c.signup_date < ${period_start}
+    why_someone_might_pick_this: |
+      A finance team that thinks of expansion as "extra cash
+      from existing customers." Cash-basis. Common in
+      organizations where the subscription system isn't
+      considered authoritative.
+    why_governed_disagrees: |
+      Confuses cash receipts with subscription value
+      changes. A customer paying their annual renewal at
+      the same price level appears as expansion under this
+      definition (positive cash from existing customer)
+      when they actually had zero ARR change.
+
+  - id: D
+    label: "Net ARR change for existing customers (positive AND negative, summed)"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0 END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(arr_end - arr_start) * 12 AS arr_expansion_net
+      FROM cust_period
+    why_someone_might_pick_this: |
+      An analyst computing "net expansion" — gross expansion
+      minus contraction within the existing-customer book,
+      including the negative contribution of fully-churned
+      customers (arr_end = 0). Useful for net-revenue-retention
+      narratives.
+    why_governed_disagrees: |
+      The governed metric is gross ARR Expansion (positive
+      deltas only). Net Expansion is a separate concept;
+      mixing them silently understates expansion when
+      contraction is present in the same period. (And under
+      the survivor-only `arr_end > 0` gate, this variant
+      would have additionally dropped fully-churned losses,
+      collapsing to "net change among period_end survivors"
+      — neither gross expansion nor true net change.)
+
+  - id: E
+    label: "Status='active' temporal filter + arr_start>0 gate (PRE-v3 GOVERNED)"
+    sql_template: |
+      WITH cust_period AS (
+        SELECT
+          c.customer_id,
+          SUM(CASE
+                WHEN s.started_at < ${period_start}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0
+              END) AS arr_start,
+          SUM(CASE
+                WHEN s.started_at < ${period_end}
+                  AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+                  AND s.status = 'active'
+                  AND s.mrr > 0
+                THEN s.mrr ELSE 0
+              END) AS arr_end
+        FROM dim_customers c
+        LEFT JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+        GROUP BY c.customer_id
+      )
+      SELECT SUM(GREATEST(arr_end - arr_start, 0)) * 12 AS arr_expansion
+      FROM cust_period
+      WHERE arr_start > 0
+    why_someone_might_pick_this: |
+      An analyst inheriting the v2 governed shape — uses
+      `status = 'active'` inside the temporal CASE WHEN and
+      gates the existing-customer cohort on arr_start > 0
+      (rather than the v3 arr_end > 0).
+    why_governed_disagrees: |
+      Two issues compound:
+      1. status='active' inside the temporal CASE WHEN
+         excludes subs that were active during the period
+         but have since cancelled (downgrade-replacement or
+         churn). Both arr_start and arr_end shrink
+         symmetrically, masking real expansion on quarters
+         with downgrade activity.
+      2. arr_start > 0 (instead of arr_end > 0) lets a
+         customer who fully churned mid-period appear in the
+         denominator with arr_end = 0, contributing zero
+         positive delta — harmless on average but
+         conceptually wrong: expansion attaches to customers
+         present at period_end, not period_start.
+      Same definitional bug class as arr_contraction's pre-v2
+      governed shape and gross_retention's pre-v2 governed
+      shape; arr_expansion was the last metric in the family
+      to retire it (v3, 2026-04-25).
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "How much did we expand last
+  quarter?", "Expansion in our existing book this fiscal
+  year", "Expansion vs contraction trend".
+notes_for_context_blocks: |
+  Baseline C's typical Cube definition for ARR Expansion is
+  often `SUM(mrr_delta WHERE delta > 0)` without the
+  existing-customer filter — that's variant A. Baseline B's
+  typical hand-rolled SQL frequently retains the v2
+  `status='active'` shape inside the CASE WHEN — that's
+  variant E. The governed lift here is two-fold: filter for
+  existing customers AND drop the status filter from
+  temporal predicates (mirror of arr_contraction v2 fix).

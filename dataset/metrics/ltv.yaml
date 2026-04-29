@@ -1,0 +1,296 @@
+metric_key: ltv
+name: Customer Lifetime Value (LTV)
+description: |
+  The average revenue a customer generates over their full
+  relationship with the company. The most assumption-laden
+  metric in the SaaS canon — every variant requires picking
+  a churn rate, a margin assumption, and a discount factor.
+  Different communities reach for different formulas:
+  Finance prefers gross-margin LTV with a discount rate;
+  Sales prefers ACV × estimated lifetime; Product prefers
+  cohort-based actuals.
+
+governed_definition:
+  variant_id: B
+  sql_template: |
+    -- LTV = (ARPU × Gross Margin %) / Customer Churn Rate.
+    -- ARPU is governed (period revenue / customers).
+    -- Gross margin is governed at 75% (per gross_margin
+    -- metric). Customer churn rate is governed (logo churn).
+    WITH starting_customers AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+      WHERE c.is_test = false
+        AND c.signup_date < ${period_start}
+        AND s.status = 'active'
+        AND s.started_at < ${period_start}
+        AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+    ),
+    churned AS (
+      SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+      FROM dim_customers c
+      WHERE c.is_test = false
+        AND c.churned_at >= ${period_start}
+        AND c.churned_at < ${period_end}
+    ),
+    revenue AS (
+      SELECT SUM(i.amount) AS rev
+      FROM fct_invoices i
+      JOIN dim_customers c ON c.customer_id = i.customer_id
+      WHERE
+        (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) >= ${period_start}
+        AND (CASE
+          WHEN i.processor = 'legacy_braintree'
+            THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+          ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+        END) < ${period_end}
+        AND i.status = 'paid'
+        AND c.is_test = false
+    )
+    SELECT
+      ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+        / NULLIF(churned.cust_count::float
+                  / NULLIF(starting_customers.cust_count, 0), 0)
+        AS ltv
+    FROM starting_customers, churned, revenue
+  plain_language_spec: |
+    LTV = (ARPU × Gross Margin) / Churn Rate. Computed at
+    period level. ARPU = period revenue / starting customer
+    count. Period revenue is computed via the governed
+    revenue definition — paid invoices, paid status,
+    non-test customers, with paid_at normalized to
+    America/Los_Angeles (with legacy_braintree paid_at
+    interpreted as America/New_York wall-clock per the
+    revenue metric). Gross Margin = 75% placeholder (the
+    company's documented unit-economics assumption — note
+    that this differs from the v2 governed gross_margin
+    metric which returns ~73% on closed periods using
+    fct_cogs; LTV intentionally pins to the planning-rate
+    placeholder rather than the trailing actual). Churn
+    Rate = logo churn (governed). Reported in dollars per
+    customer per period.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-04-25"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Computed period revenue with raw `i.paid_at`
+        windowing instead of the governed revenue
+        normalization (legacy_braintree paid_at
+        interpreted as America/New_York wall-clock; rest
+        UTC; all converted to America/Los_Angeles before
+        windowing). The legacy_braintree subset is ~35%
+        of fct_invoices and shifts a small but consistent
+        share of cash flow across period boundaries —
+        when LTV inherits raw windowing, ARPU drifts
+        accordingly. Tightened in v2 by mirroring the
+        governed revenue CTE shape.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["quarterly", "annual"]
+    default_grain: "annual"
+  canonical_filters:
+    - "ARPU computed from governed Revenue / governed Customer count"
+    - "Revenue uses the governed timezone normalization (processor-aware)"
+    - "Gross margin assumed 75% (the company's documented planning-rate placeholder)"
+    - "Churn rate is logo churn (per churn_rate governed)"
+
+variants:
+  - id: A
+    label: "ARPU × 1/Churn (no margin adjustment)"
+    sql_template: |
+      WITH starting_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.status = 'active'
+      ),
+      churned AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      ),
+      revenue AS (
+        SELECT SUM(amount) AS rev
+        FROM fct_invoices
+        WHERE paid_at >= ${period_start}
+          AND paid_at < ${period_end}
+          AND status = 'paid'
+      )
+      SELECT
+        (revenue.rev / NULLIF(starting_customers.cust_count, 0))
+          / NULLIF(churned.cust_count::float
+                    / NULLIF(starting_customers.cust_count, 0), 0)
+          AS ltv
+      FROM starting_customers, churned, revenue
+    why_someone_might_pick_this: |
+      The textbook simple LTV: ARPU / churn. Skips the
+      gross-margin multiplier. Common in introductory SaaS
+      analysis or when the analyst doesn't have a
+      published margin assumption.
+    why_governed_disagrees: |
+      Returns gross LTV, not net LTV. ~33% higher than
+      governed because it doesn't apply the 75%
+      gross-margin haircut. Mixing gross and net LTV in
+      reports is a common confusion source.
+
+  - id: B
+    label: "ARPU × Gross Margin / Churn, governed-revenue windowing (GOVERNED)"
+    sql_template: |
+      WITH starting_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.status = 'active'
+          AND s.started_at < ${period_start}
+          AND (s.ended_at IS NULL OR s.ended_at > ${period_start})
+      ),
+      churned AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      ),
+      revenue AS (
+        SELECT SUM(i.amount) AS rev
+        FROM fct_invoices i
+        JOIN dim_customers c ON c.customer_id = i.customer_id
+        WHERE
+          (CASE
+            WHEN i.processor = 'legacy_braintree'
+              THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+            ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+          END) >= ${period_start}
+          AND (CASE
+            WHEN i.processor = 'legacy_braintree'
+              THEN i.paid_at AT TIME ZONE 'America/New_York' AT TIME ZONE 'America/Los_Angeles'
+            ELSE i.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'
+          END) < ${period_end}
+          AND i.status = 'paid'
+          AND c.is_test = false
+      )
+      SELECT
+        ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+          / NULLIF(churned.cust_count::float
+                    / NULLIF(starting_customers.cust_count, 0), 0)
+          AS ltv
+      FROM starting_customers, churned, revenue
+    why_someone_might_pick_this: |
+      The standard SaaS LTV formula with gross-margin
+      adjustment AND the governed revenue windowing —
+      legacy_braintree paid_at interpreted as
+      America/New_York wall-clock, all else UTC,
+      normalized to America/Los_Angeles before windowing.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: C
+    label: "Cohort-actual LTV (sum of revenue per customer cohort)"
+    sql_template: |
+      WITH cohort AS (
+        SELECT c.customer_id, c.signup_date,
+               DATE_TRUNC('quarter', c.signup_date) AS cohort_q
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.signup_date >= ${period_start}::date - INTERVAL '4 years'
+          AND c.signup_date < ${period_end}
+      ),
+      cohort_revenue AS (
+        SELECT
+          ch.cohort_q,
+          ch.customer_id,
+          SUM(i.amount) AS total_rev
+        FROM cohort ch
+        LEFT JOIN fct_invoices i ON i.customer_id = ch.customer_id
+          AND i.status = 'paid'
+        GROUP BY ch.cohort_q, ch.customer_id
+      )
+      SELECT AVG(total_rev) AS ltv
+      FROM cohort_revenue
+    why_someone_might_pick_this: |
+      A product-led-growth team that prefers actuals to
+      formulas. Walks customer cohorts, sums their
+      lifetime revenue, averages. More empirically grounded
+      than the formula-based variants.
+    why_governed_disagrees: |
+      Different methodology. Cohort-actual LTV is
+      backward-looking (only customers who have lived
+      long enough to have observable lifetime revenue).
+      Governed LTV is the forward-projected estimate
+      used for unit-economics and CAC payback. Mixing
+      them produces incoherent ratios.
+
+  - id: D
+    label: "Discounted LTV (NPV with 10% rate)"
+    sql_template: |
+      WITH starting_customers AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        JOIN fct_subscriptions s ON s.customer_id = c.customer_id
+        WHERE c.is_test = false
+          AND c.signup_date < ${period_start}
+          AND s.status = 'active'
+      ),
+      churned AS (
+        SELECT COUNT(DISTINCT c.customer_id) AS cust_count
+        FROM dim_customers c
+        WHERE c.is_test = false
+          AND c.churned_at >= ${period_start}
+          AND c.churned_at < ${period_end}
+      ),
+      revenue AS (
+        SELECT SUM(amount) AS rev
+        FROM fct_invoices
+        WHERE paid_at >= ${period_start}
+          AND paid_at < ${period_end}
+          AND status = 'paid'
+      )
+      SELECT
+        ((revenue.rev / NULLIF(starting_customers.cust_count, 0)) * 0.75)
+          / NULLIF(
+            (churned.cust_count::float
+              / NULLIF(starting_customers.cust_count, 0))
+            + 0.10, 0)
+          AS ltv
+      FROM starting_customers, churned, revenue
+    why_someone_might_pick_this: |
+      A finance-aligned LTV with discount rate baked into
+      the denominator. NPV-correct for valuing future
+      cashflows. Common in M&A and venture-investing
+      LTV calculations.
+    why_governed_disagrees: |
+      Different denominator (churn + discount rate vs
+      churn alone). Returns a smaller, more conservative
+      LTV. The governed metric does not include a
+      discount rate; that's a separate metric (e.g.,
+      "Discounted LTV") with explicit qualifier.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our LTV?",
+  "LTV by customer segment", "LTV trend by signup
+  cohort." Pair with CAC and Payback Period for
+  the unit-economics question set.
+notes_for_context_blocks: |
+  Baseline B should expose the gross-margin assumption
+  (75%). Baseline C's typical Cube measure for LTV is
+  often defined inline with hardcoded margin and churn
+  parameters — closest to governed but parameter
+  values may differ.

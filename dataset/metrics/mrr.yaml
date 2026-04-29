@@ -1,0 +1,163 @@
+metric_key: mrr
+name: Monthly Recurring Revenue (MRR)
+description: |
+  The total recurring subscription revenue normalized to a
+  one-month basis at a point in time. The pulse-rate metric
+  for a SaaS business — drives expansion/contraction tracking,
+  cohort analyses, and most board-level commentary on growth
+  velocity. Definitionally similar to ARR/12, but the per-month
+  surface introduces its own ambiguities: which day of the
+  month is the as-of, how do mid-month start/end dates count,
+  and what timezone defines "the month."
+
+governed_definition:
+  variant_id: C
+  sql_template: |
+    SELECT SUM(s.mrr) AS mrr
+    FROM fct_subscriptions s
+    JOIN dim_customers c ON c.customer_id = s.customer_id
+    WHERE s.status = 'active'
+      AND s.started_at <= ${period_end}
+      AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+      AND s.mrr > 0
+      AND c.is_test = false
+      AND c.churned_at IS NULL
+  plain_language_spec: |
+    Sum of `mrr` across all currently-active, non-test,
+    non-churned customer subscriptions as of the last day of
+    the requested period. The "as-of" date is the period end,
+    interpreted in the workspace's default timezone
+    (America/Los_Angeles). Refund-accounting negative MRR rows
+    are excluded.
+
+governance_metadata:
+  version: "v2"
+  lifecycle_status: APPROVED
+  owner_team: finance
+  approver: cfo
+  approved_at: "2026-02-10"
+  deprecated_versions:
+    - version: "v1"
+      reason: |
+        Used a UTC interpretation of "end of month" for
+        as-of-date selection, which caused MRR to swing
+        ~$50K based on which timezone the query ran in.
+        Retired when the West Coast finance team and the
+        Sydney revenue team got different March numbers from
+        the same warehouse.
+  time_logic:
+    fiscal_calendar_start_month: 1
+    timezone: "America/Los_Angeles"
+    grain: ["monthly"]
+    default_grain: "monthly"
+  canonical_filters:
+    - "Exclude test customers"
+    - "Exclude churned customers"
+    - "Exclude negative-MRR refund rows"
+    - "Subscription must be active by both status AND end-of-period date check"
+
+variants:
+  - id: A
+    label: "SUM(mrr) where status = 'active'"
+    sql_template: |
+      SELECT SUM(mrr) AS mrr
+      FROM fct_subscriptions
+      WHERE status = 'active'
+    why_someone_might_pick_this: |
+      The textbook one-line MRR query. Most analytics blogs
+      and every "calculate MRR" tutorial give this exact form.
+      An analyst who hasn't yet been burned by the messiness
+      writes this first.
+    why_governed_disagrees: |
+      Counts negative refund rows, stale `status='active'` rows
+      after `ended_at`, and test customers. Inflates MRR by
+      ~7-9% in this warehouse. Also ignores the as-of date —
+      returns "MRR right now" rather than "MRR as of period
+      end."
+
+  - id: B
+    label: "SUM(mrr) on active subscriptions, period-end date window"
+    sql_template: |
+      SELECT SUM(mrr) AS mrr
+      FROM fct_subscriptions
+      WHERE status = 'active'
+        AND started_at <= ${period_end}
+        AND (ended_at IS NULL OR ended_at > ${period_end})
+    why_someone_might_pick_this: |
+      An analyst who realizes the `status = 'active'` flag
+      goes stale and adds the date-window check. Common
+      "fixed v1" version when the team has been burned by
+      stale flags but hasn't yet noticed test/refund issues.
+    why_governed_disagrees: |
+      Still counts test-customer subscriptions and negative
+      refund-accounting rows. In this warehouse: ~5%
+      test contamination + ~2% refund inflation.
+
+  - id: C
+    label: "MRR on active, non-test, non-churned subscriptions with positive MRR (GOVERNED)"
+    sql_template: |
+      SELECT SUM(s.mrr) AS mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND s.started_at <= ${period_end}
+        AND (s.ended_at IS NULL OR s.ended_at > ${period_end})
+        AND s.mrr > 0
+        AND c.is_test = false
+        AND c.churned_at IS NULL
+    why_someone_might_pick_this: |
+      An analyst with full warehouse familiarity. Combines
+      every filter discovery into one query.
+    why_governed_disagrees: |
+      This IS the governed definition.
+
+  - id: D
+    label: "Cash-billed monthly recurring revenue (from invoices)"
+    sql_template: |
+      SELECT SUM(amount) AS mrr
+      FROM fct_invoices
+      WHERE paid_at >= DATE_TRUNC('month', ${period_end})
+        AND paid_at < DATE_TRUNC('month', ${period_end}) + INTERVAL '1 month'
+        AND status = 'paid'
+    why_someone_might_pick_this: |
+      Finance teams that prefer cash-collected over
+      subscription-book MRR — particularly common at
+      companies with high annual-prepay rates where the
+      subscription book underrepresents cash velocity.
+    why_governed_disagrees: |
+      Annual-prepay payments lump into one month, distorting
+      month-over-month comparison. Mixes one-time charges
+      with recurring. Timezone-mixed `paid_at` makes the
+      "this month" boundary unreliable in this warehouse.
+
+  - id: E
+    label: "ARR / 12"
+    sql_template: |
+      SELECT (SUM(s.mrr) * 12) / 12.0 AS mrr
+      FROM fct_subscriptions s
+      JOIN dim_customers c ON c.customer_id = s.customer_id
+      WHERE s.status = 'active'
+        AND c.is_test = false
+    why_someone_might_pick_this: |
+      A reporting team that computes ARR as the source of
+      truth and derives MRR as ARR/12 for consistency. Some
+      companies do this deliberately to enforce that ARR and
+      MRR never disagree by more than a rounding error.
+    why_governed_disagrees: |
+      Same numeric result as variant B if ARR is computed
+      identically — but the lineage is "via ARR" rather than
+      "directly from subscription book." This matters when
+      ARR has its own filtering quirks (deprecated v1/v2
+      shapes); a downstream MRR computed from a stale ARR
+      definition silently inherits those errors.
+
+notes_for_test_questions: |
+  Strong ambiguity questions: "What's our MRR for March?",
+  "Trailing 6-month MRR trend", "MRR by plan tier", "MoM
+  MRR change last quarter" (timezone + month-boundary
+  interpretation matter heavily).
+notes_for_context_blocks: |
+  Baseline B should hint at the negative-MRR refund issue but
+  not at test customers. Baseline C should expose a Cube
+  measure on `status='active'` only — the gap is the
+  test/refund/churn filter set.
