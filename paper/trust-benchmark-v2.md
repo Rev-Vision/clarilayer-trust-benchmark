@@ -86,19 +86,19 @@ V2.1-RR uses the v2.0 warehouse byte-for-byte: deterministically-seeded syntheti
 
 The Drift category PASS criterion is unchanged: judge label ∈ {`flagged`, `canonical-with-rejection`}. The judge model and temperature are unchanged: `anthropic/claude-sonnet-4.5` at T=0.0. The judge prompt was re-locked under v2.1 because the F1 contract changed the response shape (the judge must now read structured `warnings` + `clarification_request` + `sql` + `rationale` fields rather than free-text SQL).
 
-- **Calibration set:** `benchmark/dataset/judge_calibration_set.json` — re-balanced for v2.1 to 12/12/13/13 across the four labels using the F1-structured response shape `{warnings, clarification_request, sql, rationale}`.
+- **Calibration set:** `dataset/judge_calibration_set.json` (preserved in the parent research repo, not mirrored here) — re-balanced for v2.1 to 12/12/13/13 across the four labels using the F1-structured response shape `{warnings, clarification_request, sql, rationale}`.
 - **Calibration agreement:** the v2.1-locked judge clears the spec's ≥85% gate at **96.0%** on the 50-entry calibration set (vs v2.0's 88.0%), with all four labels above the 85% per-label recall floor. Report at [`results/judge_calibration_2026-05-03-v2.1.md`](../results/judge_calibration_2026-05-03-v2.1.md). The v2.0 calibration report (`judge_calibration_2026-05-03.md`) is preserved in the parent research repo as a historical record but no longer governs the V2.1-RR judge.
 - **Inputs to the judge:** the model's parsed `warnings` array, parsed `clarification_request`, the answer text (`sql` + `rationale`), the original adversarial question, and the question's canonical/deprecated metadata (`canonical_answer_value`, `deprecated_answer_value`, `canonical_answer_sql` from the question YAML). **Blinded from the judge:** the baseline label (A/B/C/D/E), the source-model identity (Opus / Sonnet / GPT), and the context-block excerpt. The canonical/deprecated metadata is necessary ground truth — there is no fully-blind judge protocol that can distinguish "silent-canonical" from "flagged" without knowing what the canonical answer is. ClariLayer (E) does not get to "look like ClariLayer" to the judge.
 
 ### Statistical protocol
 
-The v2.0 paired-bootstrap analysis is preserved as the v2.0 artifact: `benchmark/analysis/v2_analysis.py` reads `v2-stability-{1..5}` and produces `benchmark/analysis/v2_results.json`. The v2.0 paper's CIs and p-values still cite that artifact, and any v2.0 number cited in this paper is sourced from it.
+The v2.0 paired-bootstrap analysis is preserved as the v2.0 artifact: `analysis/v2_analysis.py` reads `v2-stability-{1..5}` (preserved in the parent research repo, not mirrored here) and produces `analysis/v2_results.json`. The v2.0 paper's CIs and p-values still cite that artifact, and any v2.0 number cited in this paper is sourced from it.
 
 V2.1-RR per-baseline aggregates and σ are computed directly from the raw JSONL across `v2.1-stability-{1..5}` (the chunk `SUMMARY.md` files in each `v2.1-stability-N/` show the per-chunk computation; this paper's headline numbers are the row sums across the 5 chunks). Paired-bootstrap 95% CIs for V2.1-RR are not yet computed — they are deferred to the v2.1.1 hardening pass — so V2.1-RR cells are reported as point estimates with stability σ across the 5 chunks rather than as bootstrap CIs.
 
 - **Primary unit (V2.1-RR):** the (question × model) pair. Stability runs are *averaged* within a (model, baseline, question) cell to reduce variance — they are not multiplied for additional N. Per-(model, baseline) aggregates pool 5 runs × 5 categories × 24 questions = 600 rows; per-(category, baseline) cells pool 3 models × 5 runs × 24 questions = 360 rows.
 - **Stability σ:** the standard deviation of a cell's PASS rate across the 5 stability chunks (sample standard deviation, n=5). Reported in §Stability variance for the headline cells.
-- **v2.0 paired-bootstrap (preserved, cited where this paper makes a v2.0 claim):** 1,000 percentile-method resamples at the (model, question) unit, RNG seed `12345`, plus-one correction on the one-sided p-value. Output preserved in `benchmark/analysis/v2_results.json`.
+- **v2.0 paired-bootstrap (preserved, cited where this paper makes a v2.0 claim):** 1,000 percentile-method resamples at the (model, question) unit, RNG seed `12345`, plus-one correction on the one-sided p-value. Output preserved in `analysis/v2_results.json`.
 
 ---
 
@@ -279,7 +279,7 @@ The v2.0 → V2.1-RR aggregate lift on E (28.3% → 47.17%) is a union of (a) F2
 
 ### Baseline-D context blocks contained a phrasing leak (post-publication)
 
-After V2.1-RR results were finalized, post-publication review surfaced a phrasing leak in the Baseline-D (dbt MetricFlow) context-block YAMLs: the `is_test` dimension's `description` field read *"True for internal / QA accounts; governed metrics MUST exclude is_test = true."*, and a `total_mrr` measure description read *"…pair with a filter for governed views."* These phrasings used governance-directive language ("MUST exclude", "governed views") inside a non-governed baseline's context block. The B/L/D's published score of **1.39%** aggregate (the second-lowest among baselines, and statistically indistinguishable from the bare-schema A and the Cube C baselines on Drift / Versioning / Approval) does not suggest the leak materially helped Baseline D — but it is a methodology defect we want surfaced rather than buried. The generator (`benchmark/scripts/build_context_blocks.py`) and all 20 Baseline-D YAMLs were corrected in the post-publication errata pass; we did **not** re-run the V2.1-RR sweep with the cleaned YAMLs (the cost would be ~$303.50 / ~10.3 hours). The published numbers stand as-is with this disclosure attached.
+After V2.1-RR results were finalized, post-publication review surfaced a phrasing leak in the Baseline-D (dbt MetricFlow) context-block YAMLs: the `is_test` dimension's `description` field read *"True for internal / QA accounts; governed metrics MUST exclude is_test = true."*, and a `total_mrr` measure description read *"…pair with a filter for governed views."* These phrasings used governance-directive language ("MUST exclude", "governed views") inside a non-governed baseline's context block. The B/L/D's published score of **1.39%** aggregate (the second-lowest among baselines, and statistically indistinguishable from the bare-schema A and the Cube C baselines on Drift / Versioning / Approval) does not suggest the leak materially helped Baseline D — but it is a methodology defect we want surfaced rather than buried. The generator (`harness/build_context_blocks.py`) and all 20 Baseline-D YAMLs were corrected in the post-publication errata pass; we did **not** re-run the V2.1-RR sweep with the cleaned YAMLs (the cost would be ~$303.50 / ~10.3 hours). The published numbers stand as-is with this disclosure attached.
 
 ---
 
@@ -287,12 +287,12 @@ After V2.1-RR results were finalized, post-publication review surfaced a phrasin
 
 Everything in this report is reproducible from a single public commit, with the same baseline-E-requires-credentials caveat as v2.0.
 
-- **Repository:** `github.com/Rev-Vision/clarilayer_v2`. Merge commit `8e22fe08`.
+- **Repository:** `github.com/Rev-Vision/clarilayer-trust-benchmark` (this companion repo). The V2.1-RR dataset commit in the parent research repo is `clarilayer_v2@8e22fe08`.
 - **Run series:** `v2.1-stability-{1..5}` — five independent stability runs, each 1,800 main calls + 360 Drift judge calls.
 - **Per-run JSONL:** `results/v2.1-stability-{1..5}/results.jsonl`.
 - **Per-run summaries:** `results/v2.1-stability-{1..5}/SUMMARY.md`.
 - **V2.1-RR source of truth:** the per-baseline aggregates and σ in this paper are computed directly from `results/v2.1-stability-{1..5}/results.jsonl`. Each chunk's `SUMMARY.md` shows the per-chunk computation; the paper's headline numbers are the row sums across the 5 chunks. Paired-bootstrap CIs for V2.1-RR are deferred to v2.1.1 (see §Statistical protocol).
-- **v2.0 paired-bootstrap artifact (preserved):** `benchmark/analysis/v2_analysis.py` (reads `v2-stability-{1..5}`) and its output `benchmark/analysis/v2_results.json` are the v2.0 paired-bootstrap analysis. They are preserved unchanged and remain the cited source for any v2.0 claim in this paper (v2.0 mean deltas, CIs, p-values).
+- **v2.0 paired-bootstrap artifact (preserved):** `analysis/v2_analysis.py` (reads `v2-stability-{1..5}` from the parent research repo) and its output `analysis/v2_results.json` are the v2.0 paired-bootstrap analysis. They are preserved unchanged and remain the cited source for any v2.0 claim in this paper (v2.0 mean deltas, CIs, p-values).
 - **v2.0 dataset (preserved):** `v2-stability-{1..5}` is preserved in the parent research repo and is not mirrored in this companion repo. The V2.1-RR datasets above supersede the v2.0 dataset for headline numbers.
 - **v1 paper (preserved):** [`trust-benchmark-v1.md`](trust-benchmark-v1.md).
 - **B0 readiness gate / bug-fix sprint:** documented in the parent research repo's `BENCHMARK-V2-SPRINT.md`; the surfaces it touched are captured in [`adr/ADR-0018-rename-metrics-tier-to-policy-tier.md`](adr/ADR-0018-rename-metrics-tier-to-policy-tier.md) and [`adr/ADR-0019-rename-metrics-version-to-definition-version.md`](adr/ADR-0019-rename-metrics-version-to-definition-version.md), both mirrored here.
@@ -301,28 +301,28 @@ Everything in this report is reproducible from a single public commit, with the 
 To reproduce:
 
 ```bash
-git clone https://github.com/Rev-Vision/clarilayer_v2
-cd clarilayer_v2
-git checkout 8e22fe08   # the merged V2.1-RR dataset commit
-pip install -r benchmark/scripts/requirements.txt
-pip install -r benchmark/analysis/requirements.txt
+git clone https://github.com/Rev-Vision/clarilayer-trust-benchmark
+cd clarilayer-trust-benchmark
+pip install -r harness/requirements.txt
+pip install -r analysis/requirements.txt
 export AI_GATEWAY_API_KEY=...   # your Vercel AI Gateway key
 
 # Re-run any one stability chunk (~$60.7, ~105 min main + ~19 min judge).
 # Note: this overwrites the existing chunk in your local checkout —
 # clone fresh into a separate directory if you want the canonical chunks
 # preserved alongside the re-run.
-python3 benchmark/scripts/harness.py --pilot \
-    --config benchmark/scripts/run_config_full_stability_1.yaml \
+python3 harness/harness.py --pilot \
+    --config harness/run_config_full_stability_1.yaml \
     --run-id v2.1-stability-1
-python3 benchmark/scripts/resolve_deferred_drift.py \
-    --results benchmark/results/v2.1-stability-1/results.jsonl
+python3 harness/resolve_deferred_drift.py \
+    --results results/v2.1-stability-1/results.jsonl
 
 # V2.1-RR aggregates: read directly from each chunk's SUMMARY.md, or sum
 # from the raw JSONL (results/v2.1-stability-{1..5}/results.jsonl).
 # v2.0 paired-bootstrap artifact (v2_results.json) is preserved unchanged
-# and reproducible by re-running v2_analysis.py against v2-stability-{1..5}:
-python3 benchmark/analysis/v2_analysis.py   # reproduces v2.0 v2_results.json
+# and reproducible by re-running v2_analysis.py against v2-stability-{1..5}
+# (the v2-stability-{1..5} dataset itself lives in the parent research repo):
+python3 analysis/v2_analysis.py   # reproduces v2.0 v2_results.json
 ```
 
 Total cost for one V2.1-RR stability chunk is approximately $60.7 (range $60.63–$60.75 across the 5 chunks). Wall-clock is approximately 105 min for the main 1,800 calls (sequential per-chunk), plus ~19 min for the Drift judge resolver. **All five stability runs in series ≈ $303.50 / ~10.3 hours.** Add ~$138.60 first-fire sunk cost for the V2.1 phase total of $442.10 ($50 over the original $400 ceiling per founder-approved overage).

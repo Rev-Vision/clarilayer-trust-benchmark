@@ -103,7 +103,7 @@ E shows decisive lift on Drift (84.7% vs 0.0% for all other baselines) -- a step
 
 ## Drift judge label distribution
 
-Locked judge: `anthropic/claude-sonnet-4.5` @ T=0.0 with prompt at `benchmark/scripts/scoring_text_judge_prompt.md`.
+Locked judge: `anthropic/claude-sonnet-4.5` @ T=0.0 with prompt at `benchmark/scripts/scoring_text_judge_prompt.md` (parent research repo; not mirrored here).
 
 | Label | Count | % of 360 | Status mapping |
 |---|---|---|---|
@@ -132,8 +132,8 @@ All 61 PASS rows came from baseline E (ClariLayer); zero `flagged` outcomes were
 
 ## Drift judge calibration (reference)
 
-The Drift judge was locked before chunk 1 via `benchmark/scripts/calibrate_drift_judge.py` and is reused unchanged for this chunk. The pre-run calibration report
-lives in `benchmark/results/judge_calibration_2026-05-03-v2.1.md`. This summary records the **applied** judge labels, not the calibration agreement statistics.
+The Drift judge was locked before chunk 1 via `harness/calibrate_drift_judge.py` and is reused unchanged for this chunk. The pre-run calibration report
+lives in `results/judge_calibration_2026-05-03-v2.1.md`. This summary records the **applied** judge labels, not the calibration agreement statistics.
 
 ## Wall-clock
 
