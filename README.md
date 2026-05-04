@@ -4,7 +4,7 @@ A 10,800-call study of how three frontier LLMs answer enterprise metric question
 
 > **Note on baseline labels.** v1 of the benchmark had ClariLayer at position **D**. V2.1-RR moves ClariLayer to position **E** and inserts **dbt MetricFlow** as the new **D** so the comparator set covers an additional widely-used semantic-layer technology. The harness modules and context blocks reflect this new layout (see `harness/baselines/` and `context-blocks/`).
 
-The companion blog post for V2.1-RR will be linked here once published.
+The companion blog post for V2.1-RR is published at [clarilayer.com/blog/post-trust-benchmark-v2-1](https://clarilayer.com/blog/post-trust-benchmark-v2-1).
 
 ## What's in this repo
 
