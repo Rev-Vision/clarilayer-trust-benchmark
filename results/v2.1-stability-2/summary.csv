@@ -1,0 +1,16 @@
+model,baseline,n_questions,n_pass,accuracy_pct,avg_prompt_tokens,avg_completion_tokens
+anthropic/claude-opus-4.7,a,120,2,1.67,1573.0,169.6
+anthropic/claude-opus-4.7,b,120,4,3.33,2715.1,228.9
+anthropic/claude-opus-4.7,c,120,2,1.67,4459.4,130.6
+anthropic/claude-opus-4.7,d,120,2,1.67,3909.9,125.3
+anthropic/claude-opus-4.7,e,120,34,28.33,9012.2,355.1
+anthropic/claude-sonnet-4.5,a,120,0,0.0,1025.5,142.8
+anthropic/claude-sonnet-4.5,b,120,3,2.5,1786.5,160.9
+anthropic/claude-sonnet-4.5,c,120,2,1.67,3245.8,125.4
+anthropic/claude-sonnet-4.5,d,120,1,0.83,2904.3,138.8
+anthropic/claude-sonnet-4.5,e,120,40,33.33,6761.7,255.7
+openai/gpt-5.4,a,120,0,0.0,887.1,157.5
+openai/gpt-5.4,b,120,4,3.33,1561.7,185.1
+openai/gpt-5.4,c,120,2,1.67,2843.9,93.7
+openai/gpt-5.4,d,120,2,1.67,2502.3,93.3
+openai/gpt-5.4,e,120,37,30.83,5716.5,234.5

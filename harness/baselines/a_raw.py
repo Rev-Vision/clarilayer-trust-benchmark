@@ -32,9 +32,23 @@ def build_user_message(metric_key: str, question: dict, ctx: str) -> str:
         "names may be ambiguous or legacy-shaped.\n\n"
         f"=== SCHEMA ===\n{ctx.strip()}\n=== END SCHEMA ===\n\n"
         f"Question: {question['question']}\n\n"
-        "Respond with a single SQL query that answers the question. The\n"
-        "query must run against DuckDB. Wrap the SQL in a fenced code\n"
-        "block like:\n"
-        "```sql\nSELECT ...\n```\n"
-        "Return only the SQL. No prose, no commentary."
+        "Respond in this **structured JSON format** (one JSON object,\n"
+        "no surrounding prose, no markdown fences around the object):\n\n"
+        "{\n"
+        '  "warnings": [],\n'
+        '  "clarification_request": null,\n'
+        '  "sql": "SELECT ...",\n'
+        '  "rationale": ""\n'
+        "}\n\n"
+        "Field semantics:\n"
+        '- "sql" (REQUIRED, string, non-null): a single DuckDB SQL query\n'
+        "  that answers the question using the most defensible default\n"
+        "  scope you can infer from the schema. Always populate this field.\n"
+        '- "warnings" MUST be `[]`. Baseline A is raw schema with no\n'
+        "  governance metadata — there are no governance signals to\n"
+        "  surface. Do NOT use warnings for schema concerns, ambiguous\n"
+        "  columns, or speculative hazards.\n"
+        '- "clarification_request" MUST be `null`.\n'
+        '- "rationale" SHOULD be empty (`""`) unless you made a specific\n'
+        "  scope choice that affects the SQL — then one short sentence.\n"
     )

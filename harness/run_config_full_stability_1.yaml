@@ -1,0 +1,73 @@
+# ClariLayer Trust Benchmark v2 — B4.2 Chunk 1 (stability run #1 of 5).
+#
+# Used by `harness.py --pilot --config this_file --run-id v2-stability-1`.
+# 120 questions × 5 baselines × 3 models × 1 stability = 1,800 calls.
+#
+# Drift rows (24 Qs × 5 baselines × 3 models = 360) land as DEFER_JUDGE per
+# `scoring_text.py`; the locked judge runs offline post-B5.
+#
+# Sampling: full battery — `question_subset` is intentionally omitted so
+# `harness._filter_questions` returns all 120 questions.
+#
+# Output: `benchmark/results/v2-stability-1/results.jsonl`.
+
+models:
+  frontier:
+    - id: anthropic/claude-opus-4.7
+      label: "Claude Opus 4.7 (1M)"
+      family: claude-opus-4
+      fallbacks:
+        - anthropic/claude-opus-4.5
+        - anthropic/claude-opus-4
+    - id: openai/gpt-5.4
+      label: "GPT-5.4"
+      family: gpt-5
+      fallbacks:
+        - openai/gpt-5-pro
+        - openai/gpt-5
+  production:
+    - id: anthropic/claude-sonnet-4.5
+      label: "Claude Sonnet 4.5"
+      family: claude-sonnet-4
+      fallbacks:
+        - anthropic/claude-sonnet-4-20250514
+
+baselines: [a, b, c, d, e]
+
+stability_runs: 1
+
+request:
+  temperature: 0.0
+  max_output_tokens: 1500
+  timeout_seconds: 90
+  retries: 3
+  retry_initial_seconds: 2
+  retry_max_seconds: 30
+
+# `--pilot` activates this block. We're using `--pilot` not because this is
+# a pilot but because the harness CLI reuses the pilot pathway whenever the
+# run id, model set, baselines, and stability_runs need to be overridden
+# without touching the canonical `run_config.yaml`. The full battery (120
+# Qs, 3 models, 5 baselines, 1 stability run) is encoded here.
+pilot:
+  models:
+    - id: anthropic/claude-opus-4.7
+      label: "Claude Opus 4.7 (1M)"
+      family: claude-opus-4
+      fallbacks:
+        - anthropic/claude-opus-4.5
+        - anthropic/claude-opus-4
+    - id: openai/gpt-5.4
+      label: "GPT-5.4"
+      family: gpt-5
+      fallbacks:
+        - openai/gpt-5-pro
+        - openai/gpt-5
+    - id: anthropic/claude-sonnet-4.5
+      label: "Claude Sonnet 4.5"
+      family: claude-sonnet-4
+      fallbacks:
+        - anthropic/claude-sonnet-4-20250514
+  baselines: [a, b, c, d, e]
+  stability_runs: 1
+  # NOTE: question_subset omitted -> _filter_questions returns all 120 Qs.

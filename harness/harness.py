@@ -22,10 +22,10 @@ Modes:
     --list-models                 list models the gateway currently advertises
     --dry-run                     resolve everything but skip API calls
 
-Auth (read from env or `.env.benchmark` produced by `seed_test_org.py`):
+Auth (read from env or `.env.benchmark` produced by R1):
     AI_GATEWAY_API_KEY            required for any real API call
-    BENCHMARK_API_KEY             required for Baseline D
-    BENCHMARK_API_BASE_URL        required for Baseline D
+    BENCHMARK_API_KEY             required for Baseline E (ClariLayer)
+    BENCHMARK_API_BASE_URL        required for Baseline E (ClariLayer)
 """
 # ruff: noqa: S608  # SQL is model-generated and runs read-only against DuckDB
 
@@ -35,10 +35,11 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -64,11 +65,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from baselines import get_module as _get_baseline  # noqa: E402
-from baselines.d_clarilayer import (  # noqa: E402
-    BaselineDAuthError,
-    BaselineDConfigError,
-    BaselineDLookupError,
-    BaselineDTransientError,
+from baselines.e_clarilayer import (  # noqa: E402
+    BaselineEAuthError,
+    BaselineEConfigError,
+    BaselineELookupError,
+    BaselineETransientError,
 )
 from scoring import (  # noqa: E402
     ScoreResult,
@@ -76,6 +77,240 @@ from scoring import (  # noqa: E402
     extract_variant_choice,
     score as score_sql,
 )
+from scoring_text import score_approval  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# v2.1-F1: Structured JSON response parser
+# ---------------------------------------------------------------------------
+#
+# The v2.1 response contract asks the model for a JSON object of the form
+#   {warnings: [str, ...], clarification_request: str|null, sql: str,
+#    rationale: str}
+# We accept either a bare JSON object OR a fenced ```json ... ``` block (some
+# models reflexively wrap their JSON in markdown despite being told not to).
+#
+# Backward compatibility: if JSON parse fails entirely, callers fall back to
+# `extract_sql()` (fenced-code-block / bare-text extraction) for the `sql`
+# field, while warnings / clarification_request / rationale default to
+# empty / None / empty string respectively. This keeps the harness robust
+# against models that ignore the contract.
+
+_JSON_FENCE_BLOCK = re.compile(
+    r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE
+)
+
+
+def _parse_response_contract(text: str) -> dict[str, Any] | None:
+    """Try to parse the v2.1 structured response contract.
+
+    Returns the parsed dict on success, or None on any parse failure.
+    Tolerates a leading / trailing prose wrapper around the JSON, and
+    accidental markdown fences. Does NOT validate the schema beyond
+    "is it a JSON object" — that's the caller's job (via the per-field
+    extractors below) so we degrade gracefully on partial responses.
+    """
+    if not text or not text.strip():
+        return None
+    raw = text.strip()
+    # 1) Fast path: the whole response IS the JSON object.
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            pass
+    # 2) Fenced ```json ... ``` block.
+    m = _JSON_FENCE_BLOCK.search(raw)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            pass
+    # 3) Last resort: greedy first { ... last }. This is fragile against
+    #    SQL strings that contain { } themselves, but we only fall back here
+    #    when the model wrapped a clean object in extra prose.
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first != -1 and last > first:
+        try:
+            obj = json.loads(raw[first : last + 1])
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _coerce_warnings(value: Any) -> list[str]:
+    """Coerce the warnings field into a list[str]. Tolerates wrong shapes.
+
+    Models occasionally return `null`, a single string, or a dict where we
+    expect an array. We coerce: strings become single-element lists, dicts
+    become their stringified values, anything else becomes [].
+
+    Filtering rule: `None` items and whitespace-only strings are dropped.
+    Since `warnings` now feeds positive governance signal downstream
+    (score_drift counts non-empty warnings as a rejection signal), blank
+    entries can't be allowed to produce false `flagged` /
+    `canonical-with-rejection` labels. Non-empty strings are stripped of
+    surrounding whitespace and kept.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            stripped = str(item).strip()
+            if stripped:
+                out.append(stripped)
+        return out
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        out_d: list[str] = []
+        for v in value.values():
+            if v is None:
+                continue
+            stripped = str(v).strip()
+            if stripped:
+                out_d.append(stripped)
+        return out_d
+    return []
+
+
+def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce optional-string fields. Empty strings collapse to None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if value.strip() else None
+    return str(value)
+
+
+def _coerce_str(value: Any) -> str:
+    """Coerce string fields with empty-string default."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _is_valid_sql_value(value: Any) -> bool:
+    """Return True iff `value` is a non-empty, non-whitespace-only string.
+
+    Used by `parse_model_response` to gate the JSON `sql` field. When a model
+    emits something like `{"sql": []}`, `{"sql": null}`, or
+    `{"clarification_request": "...", "sql": "  "}`, we must treat the field
+    as MISSING — not stringify it (`str([]) == "[]"`) or fall through
+    `extract_sql()` on the JSON-stringified payload, both of which produce
+    non-executable junk that the harness then tries to run as SQL.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
+# Fenced-block-only SQL extraction. Distinct from `scoring.extract_sql()`
+# (which has a third fallback that treats the whole text as SQL). Used by
+# `parse_model_response` when the JSON `sql` field is invalid: we want to
+# recover SQL the model put in a fenced block alongside the JSON envelope,
+# but we DO NOT want to fall through to the bare-text path because the
+# text is the JSON envelope itself, not SQL.
+_FENCED_SQL_BLOCK_RE = re.compile(
+    r"```sql\s*(.+?)(?:```|$)", re.IGNORECASE | re.DOTALL
+)
+_FENCED_BARE_BLOCK_RE = re.compile(r"```\s*(.+?)(?:```|$)", re.DOTALL)
+
+
+def _extract_fenced_sql_block(text: str) -> str:
+    """Extract SQL from a fenced ```sql ... ``` (or bare ``` ... ```) block.
+
+    Returns empty string if no fenced block is found. Unlike
+    `scoring.extract_sql()`, never falls back to treating the whole text
+    as SQL — this matters when the input text is a JSON envelope and we
+    must NOT run JSON noise as SQL.
+    """
+    if not text:
+        return ""
+    m = _FENCED_SQL_BLOCK_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    m = _FENCED_BARE_BLOCK_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+@dataclass
+class ParsedResponse:
+    """Decomposed view of a model response under the v2.1 contract.
+
+    Always set:
+      - sql:                    extracted SQL (parsed JSON `sql` field, or
+                                fenced-code-block fallback). Empty string
+                                only when neither path yielded anything.
+      - response_json:          the parsed JSON object, or None if parse failed.
+      - warnings:               list[str], possibly empty.
+      - clarification_request:  str or None.
+      - rationale:              str, possibly empty.
+    """
+    sql: str
+    response_json: dict[str, Any] | None
+    warnings: list[str]
+    clarification_request: str | None
+    rationale: str
+
+
+def parse_model_response(text: str) -> ParsedResponse:
+    """Decompose a raw model response per the v2.1 structured contract.
+
+    Behavior:
+      1. Try to parse the response as the v2.1 JSON contract object.
+      2. If parse succeeds: extract `sql`, `warnings`, `clarification_request`,
+         `rationale` with defensive coercion. If `sql` is missing or empty
+         in the parsed object, fall back to fenced-code-block extraction
+         on the raw text so we never lose SQL we could otherwise execute.
+      3. If parse fails: set `response_json=None`, extract `sql` via
+         `extract_sql()` (legacy fenced-code-block path), and default the
+         other fields to empty/None.
+
+    This is the central backward-compat shim — the numeric scorer keeps
+    seeing `model_sql` exactly as it did under v2.0, and the Drift scorer
+    gets richer signal when the model honors the contract.
+    """
+    raw = text or ""
+    parsed = _parse_response_contract(raw)
+    if parsed is not None:
+        sql_raw = parsed.get("sql")
+        if _is_valid_sql_value(sql_raw):
+            sql_field = sql_raw.strip()
+        else:
+            # Invalid `sql` in JSON (list / None / empty / whitespace-only).
+            # Treat as MISSING and fall back to fenced-code-block extraction
+            # on the original raw text — never on the JSON-stringified
+            # payload (which would produce junk like `str([]) == "[]"`)
+            # nor via `extract_sql()` (which would treat the JSON envelope
+            # itself as SQL when no fenced block is present).
+            sql_field = _extract_fenced_sql_block(raw)
+        return ParsedResponse(
+            sql=sql_field,
+            response_json=parsed,
+            warnings=_coerce_warnings(parsed.get("warnings")),
+            clarification_request=_coerce_optional_str(
+                parsed.get("clarification_request")
+            ),
+            rationale=_coerce_str(parsed.get("rationale")),
+        )
+    # Parse failed entirely — backward-compat fenced-code-block path.
+    return ParsedResponse(
+        sql=extract_sql(raw),
+        response_json=None,
+        warnings=[],
+        clarification_request=None,
+        rationale="",
+    )
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -89,13 +324,45 @@ RESULTS_ROOT = ROOT / "results"
 DEFAULT_CONFIG = HERE / "run_config.yaml"
 
 GATEWAY_BASE = "https://ai-gateway.vercel.sh/v1"
+# v2.1-F1 (prose-with-SQL contract): the system prompt asks for a single
+# JSON object matching the structured response contract documented in
+# `RESPONSE_CONTRACT.md`. The user message (built per-baseline) restates
+# the schema + field semantics. The `sql` field is REQUIRED and must
+# always be populated with executable DuckDB SQL — `warnings` and
+# `clarification_request` are governance signal, not an excuse to omit
+# SQL. This replaces the v2.0 "SQL only, no prose" directive that
+# mechanically suppressed Drift / Approval / Versioning signal.
 SYSTEM_PROMPT = (
-    "You are a senior data analyst. Output ONLY a single DuckDB SQL query "
-    "wrapped in ```sql ... ``` and NOTHING ELSE — no prose, no commentary, "
-    "no candidates, no explanation, no greeting, no apology. The query "
-    "must run as-is against the schema below. Verbose output is wrong "
-    "output: if you exceed the token limit your fenced block will not "
-    "close and your answer will be discarded."
+    "You are a senior data analyst. Respond with a single JSON object "
+    "matching this schema:\n"
+    '{"warnings": [string, ...], "clarification_request": string|null, '
+    '"sql": string, "rationale": string}\n'
+    "**The `sql` field is REQUIRED and must always be a non-null, "
+    "executable DuckDB SQL query.**\n\n"
+    "**`warnings` MUST default to an empty array `[]`.** ONLY populate "
+    "warnings when the metric envelope contains an EXPLICIT governance "
+    "signal that fires for the user's question — concretely: a "
+    "`deprecated_framing_rules[*]` whose trigger_patterns match the "
+    "user's framing, a non-null `approval_state` whose policy directs you "
+    "to surface its status, a `requires_disambiguation` whose policy is "
+    "`answer-with-default-scope-and-disclose` and the user did not "
+    "specify scope, or a `consumer_contexts` entry whose pinning differs "
+    "from the canonical version. Do NOT populate warnings for generic "
+    "schema concerns (ambiguous columns, legacy aliases, NULL-prone "
+    "fields, etc.) — those are NOT governance signals. If the metric "
+    "envelope is missing or has no triggering governance fields, "
+    "warnings MUST be `[]`.\n\n"
+    "**`clarification_request` MUST default to `null`.** ONLY populate it "
+    "when `requires_disambiguation.policy == 'ask-clarification-first'` "
+    "and the question is missing required scope. Even then, you must "
+    "still produce a non-null `sql` using `default_scope`.\n\n"
+    "**`rationale` is optional and SHOULD BE EMPTY** unless you made a "
+    "specific scope or version choice that affects the SQL. Keep it to "
+    "one short sentence at most.\n\n"
+    "Output the JSON object only — no surrounding prose, no markdown "
+    "fences. Verbose output is wrong output: empty `warnings`/`null` "
+    "`clarification_request`/empty `rationale` is the correct shape for "
+    "the vast majority of calls."
 )
 
 # Hardcoded per-model pricing (USD per 1M tokens) keyed by `family` from
@@ -119,8 +386,9 @@ PRICING: dict[str, tuple[float, float]] = {
 def _load_env_files() -> None:
     """Load `.env.benchmark` if present; fall through silently otherwise."""
     candidates = [
-        ROOT / ".env.benchmark",        # repo-root/.env.benchmark
-        HERE / ".env.benchmark",        # harness/.env.benchmark
+        ROOT / ".env.benchmark",        # benchmark/.env.benchmark
+        HERE / ".env.benchmark",        # benchmark/scripts/.env.benchmark
+        ROOT.parent / ".env.benchmark", # repo-root/.env.benchmark
     ]
     for path in candidates:
         if path.exists():
@@ -145,8 +413,8 @@ def _resolve_run_models(cfg: dict[str, Any], pilot: bool) -> list[dict[str, Any]
 
 def _resolve_run_baselines(cfg: dict[str, Any], pilot: bool) -> list[str]:
     if pilot:
-        return list(cfg.get("pilot", {}).get("baselines", cfg.get("baselines", ["a", "b", "c", "d"])))
-    return list(cfg.get("baselines", ["a", "b", "c", "d"]))
+        return list(cfg.get("pilot", {}).get("baselines", cfg.get("baselines", ["a", "b", "c", "d", "e"])))
+    return list(cfg.get("baselines", ["a", "b", "c", "d", "e"]))
 
 
 def _resolve_stability_runs(cfg: dict[str, Any], pilot: bool) -> int:
@@ -234,7 +502,7 @@ def _retry_after_aware_wait(state: RetryCallState) -> float:
 
     Honors `retry_after_seconds` on either `GatewayTransientError` (for the
     chat-completions retry) or any other transient error class that exposes
-    the same attribute (e.g. `BaselineDTransientError` on Metric API calls).
+    the same attribute (e.g. `BaselineETransientError` on Metric API calls).
     Falls back to wait_exponential(min=2,max=30,mult=2) when absent.
     """
     exc = state.outcome.exception() if state.outcome else None
@@ -425,6 +693,29 @@ class CallResult:
     status: str
     error: str | None
     detail: str
+    # v2 additions (B4.1):
+    #   - rubric_lane: which scoring path was used ("numeric" | "approval" | "drift")
+    #   - category: question category for downstream summarisation
+    #   - model_text: full gateway response content. Required by the Drift
+    #     auto-label step (calibrate_drift_judge.py) which needs the raw
+    #     candidate answer to feed into the LLM-as-judge. Numeric/Approval
+    #     callers can ignore this field.
+    rubric_lane: str = "numeric"
+    category: str | None = None
+    model_text: str = ""
+    # v2.1-F1 additions (prose-with-SQL contract):
+    #   - model_response_json: parsed v2.1 contract object, or None if the
+    #     model returned malformed JSON. Lets downstream tooling distinguish
+    #     "honored the contract" from "fell back to fenced-code-block".
+    #   - model_warnings: array of governance / scope warnings.
+    #   - model_clarification_request: clarification text or None.
+    #   - model_rationale: brief rationale (one-line per contract).
+    # The Drift judge consumes warnings + clarification_request as positive
+    # signal for `flagged` / `canonical-with-rejection` labels.
+    model_response_json: dict[str, Any] | None = None
+    model_warnings: list[str] = field(default_factory=list)
+    model_clarification_request: str | None = None
+    model_rationale: str = ""
 
     def to_jsonl(self) -> str:
         return json.dumps(
@@ -444,6 +735,13 @@ class CallResult:
                 "status": self.status,
                 "error": self.error,
                 "detail": self.detail,
+                "rubric_lane": self.rubric_lane,
+                "category": self.category,
+                "model_text": self.model_text,
+                "model_response_json": self.model_response_json,
+                "model_warnings": self.model_warnings,
+                "model_clarification_request": self.model_clarification_request,
+                "model_rationale": self.model_rationale,
             },
             default=str,
         )
@@ -453,21 +751,21 @@ class CallResult:
     reraise=True,
     stop=stop_after_attempt(3),
     wait=_retry_after_aware_wait,
-    retry=retry_if_exception_type(BaselineDTransientError),
+    retry=retry_if_exception_type(BaselineETransientError),
 )
 def _fetch_context_with_retry(baseline_mod, metric_key: str) -> str:
-    """Wrap `baseline_mod.fetch_context` so Baseline D's transient errors retry.
+    """Wrap `baseline_mod.fetch_context` so Baseline E's transient errors retry.
 
-    Baselines A/B/C are static-file lookups and won't raise the transient
+    Baselines A/B/C/D are static-file lookups and won't raise the transient
     error class, so they pass through this wrapper for free.
     """
     return baseline_mod.fetch_context(metric_key)
 
 
-# Synthetic envelope for Baseline D dry-runs. Roughly the same length and
+# Synthetic envelope for Baseline E dry-runs. Roughly the same length and
 # shape as a real metric envelope so the prompt-token estimate stays
 # representative for cost projection — but no network call.
-_DRY_RUN_BASELINE_D_PLACEHOLDER = (
+_DRY_RUN_BASELINE_E_PLACEHOLDER = (
     "# Governed metric record for `{metric_key}` (live ClariLayer API)\n"
     "Source: ClariLayer Canonical Metric API v1. This is the\n"
     "production response — not a curated extract.\n\n"
@@ -490,14 +788,14 @@ _DRY_RUN_BASELINE_D_PLACEHOLDER = (
 def _dry_run_context(baseline: str, baseline_mod, metric_key: str) -> str:
     """Resolve a context block in dry-run mode without hitting the network.
 
-    Baselines A/B/C: load the static fixture from disk (cheap, deterministic
+    Baselines A/B/C/D: load the static fixture from disk (cheap, deterministic
     so the dry-run prompt-token estimate matches a real run).
-    Baseline D: synthesize a placeholder envelope rather than calling the
+    Baseline E: synthesize a placeholder envelope rather than calling the
     live Metric API — that's the whole point of --dry-run.
     """
-    if baseline.lower() == "d":
-        return _DRY_RUN_BASELINE_D_PLACEHOLDER.format(metric_key=metric_key)
-    # A/B/C are local file reads; safe to call directly.
+    if baseline.lower() == "e":
+        return _DRY_RUN_BASELINE_E_PLACEHOLDER.format(metric_key=metric_key)
+    # A/B/C/D are local file reads; safe to call directly.
     return baseline_mod.fetch_context(metric_key)
 
 
@@ -518,7 +816,7 @@ def _execute_one(
     baseline_mod = _get_baseline(baseline)
 
     if dry_run:
-        # Resolve context WITHOUT touching the network. Baseline D used to
+        # Resolve context WITHOUT touching the network. Baseline E used to
         # call its live Metric API here even in dry-run, defeating the flag.
         try:
             ctx = _dry_run_context(baseline, baseline_mod, metric_key)
@@ -547,11 +845,11 @@ def _execute_one(
 
     try:
         ctx = _fetch_context_with_retry(baseline_mod, metric_key)
-    except BaselineDAuthError:
+    except BaselineEAuthError:
         raise  # propagate — abort run (parallels GatewayAuthError)
-    except BaselineDConfigError:
-        raise  # propagate — Baseline D wiring missing, fail fast
-    except (BaselineDLookupError, FileNotFoundError, KeyError) as exc:
+    except BaselineEConfigError:
+        raise  # propagate — Baseline E wiring missing, fail fast
+    except (BaselineELookupError, FileNotFoundError, KeyError) as exc:
         # Application-shape errors: log as ERROR row, continue the run.
         return CallResult(
             model=model_id, baseline=baseline, metric_key=metric_key,
@@ -563,7 +861,7 @@ def _execute_one(
             error=f"context fetch failed: {type(exc).__name__}: {exc}",
             detail="",
         )
-    except (BaselineDTransientError, httpx.HTTPStatusError) as exc:
+    except (BaselineETransientError, httpx.HTTPStatusError) as exc:
         # Transient errors that exhausted the tenacity retry budget, or
         # other 4xx that bubbled up. Logged as ERROR; run continues.
         return CallResult(
@@ -607,9 +905,49 @@ def _execute_one(
             detail="",
         )
 
-    sql = extract_sql(gw.content)
+    # v2.1-F1: parse the structured-JSON response contract (with graceful
+    # fenced-code-block fallback for malformed JSON). `parsed.sql` is the
+    # canonical SQL field — use it for execution / scoring, keeping the raw
+    # `model_text` for backward-compat diff'ing against v2.0 datasets.
+    parsed = parse_model_response(gw.content or "")
+    sql = parsed.sql
     variant = extract_variant_choice(gw.content)
-    score: ScoreResult = score_sql(duck, sql, expected_value)
+
+    # v2 B4.1: dispatch on rubric_lane.
+    # - numeric  → score_sql against the warehouse (v1 path).
+    # - approval → score_approval (deterministic substring + alias match).
+    # - drift    → defer judge call. The harness persists the raw model_text
+    #              and a placeholder status; calibrate_drift_judge.py + the
+    #              auto-label step in B4.1 consume model_text to populate
+    #              the calibration set, after which the judge can be locked
+    #              and applied to all Drift rows.
+    rubric_lane = (question.get("rubric_lane") or "numeric").lower()
+    category = question.get("category")
+    if rubric_lane == "numeric":
+        score = score_sql(duck, sql, expected_value)
+    elif rubric_lane == "approval":
+        text_score = score_approval(question, gw.content or "")
+        score = ScoreResult(
+            status=text_score.status,
+            actual_value=text_score.actual_value,
+            error=text_score.error,
+            detail=text_score.detail,
+        )
+    elif rubric_lane == "drift":
+        # Calibration not yet locked — judge runs in B4.1 phase 3 separately.
+        # Persist model_text + structured fields so the auto-labeller has
+        # the full response and the v2.1 governance signal.
+        score = ScoreResult(
+            status="DEFER_JUDGE",
+            actual_value=None,
+            error=None,
+            detail="drift judge not yet calibrated; raw text persisted for offline labelling",
+        )
+    else:
+        raise ValueError(
+            f"unknown rubric_lane {rubric_lane!r} on question {qid!r}; "
+            "expected one of: numeric, approval, drift"
+        )
 
     return CallResult(
         model=model_id, baseline=baseline, metric_key=metric_key,
@@ -619,6 +957,12 @@ def _execute_one(
         model_sql=sql, variant_choice=variant,
         actual_value=score.actual_value, expected_value=expected_value,
         status=score.status, error=score.error, detail=score.detail,
+        rubric_lane=rubric_lane, category=category,
+        model_text=gw.content or "",
+        model_response_json=parsed.response_json,
+        model_warnings=parsed.warnings,
+        model_clarification_request=parsed.clarification_request,
+        model_rationale=parsed.rationale,
     )
 
 
@@ -800,7 +1144,7 @@ def main(argv: list[str]) -> int:
     _load_env_files()
 
     if args.full and not args.budget_approved:
-        print("ERROR: --full requires --budget-approved (cost gate).", file=sys.stderr)
+        print("ERROR: --full requires --budget-approved (G1 founder approval gate).", file=sys.stderr)
         return 2
     if not args.pilot and not args.full and not args.list_models:
         print("ERROR: pass --pilot or --full (or --list-models).", file=sys.stderr)
@@ -904,11 +1248,11 @@ def main(argv: list[str]) -> int:
                         model_id, baseline, q, run_idx,
                         request_cfg, args.dry_run,
                     )
-                except (GatewayAuthError, BaselineDAuthError) as exc:
+                except (GatewayAuthError, BaselineEAuthError) as exc:
                     print(f"FATAL: {exc}", file=sys.stderr)
                     return 3
-                except BaselineDConfigError as exc:
-                    print(f"FATAL: Baseline D not configured — {exc}", file=sys.stderr)
+                except BaselineEConfigError as exc:
+                    print(f"FATAL: Baseline E not configured — {exc}", file=sys.stderr)
                     return 2
 
                 # Stash the family on the row for downstream cost analysis.
@@ -944,7 +1288,7 @@ def main(argv: list[str]) -> int:
             list(cfg.get("models", {}).get("frontier", []))
             + list(cfg.get("models", {}).get("production", []))
         )
-        full_baselines = list(cfg.get("baselines", ["a", "b", "c", "d"]))
+        full_baselines = list(cfg.get("baselines", ["a", "b", "c", "d", "e"]))
         full_questions_n = len(all_questions)
         full_stability = int(cfg.get("stability_runs", 2))
         _print_pilot_report(
