@@ -149,14 +149,6 @@ def main() -> int:
         print(f"ERROR: {args.results} not found", file=sys.stderr)
         return 2
 
-    api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
-    if not api_key:
-        print(
-            "ERROR: AI_GATEWAY_API_KEY unset. Source .env.benchmark.",
-            file=sys.stderr,
-        )
-        return 2
-
     questions_by_id = _load_drift_questions_by_id()
     if not questions_by_id:
         print(
@@ -182,6 +174,15 @@ def main() -> int:
 
     if args.limit is not None:
         defer_indices = defer_indices[: args.limit]
+
+    # API key only required when we actually have DEFER_JUDGE rows to resolve.
+    api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
+    if not api_key:
+        print(
+            "ERROR: AI_GATEWAY_API_KEY unset. Source .env.benchmark.",
+            file=sys.stderr,
+        )
+        return 2
 
     print(
         f"Resolving {len(defer_indices)} DEFER_JUDGE rows via "

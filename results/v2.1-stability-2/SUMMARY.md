@@ -117,7 +117,7 @@ All 61 PASS rows came from baseline E (ClariLayer); zero `flagged` outcomes were
 
 ## Anomalies
 
-- **ERROR rows: 21 (1.2%)** -- in line with chunk 1 (1.0%) and well below the pilot's 12.3%. Top error fingerprints:
+- **ERROR rows: 21 (1.2%)** -- in line with chunk 1 (0.8%) and well below the pilot's 12.3%. Top error fingerprints:
   - `CatalogException: Catalog Error: Table with name time_spine does not exist` x 7
   - `BinderException: Binder Error: column "curr_q_start" must appear in the GROUP BY` x 2
   - `BinderException: Binder Error: column "total_customers" must appear in the GROUP BY` x 2

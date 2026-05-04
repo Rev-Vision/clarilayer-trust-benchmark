@@ -923,7 +923,9 @@ def _execute_one(
     #              and applied to all Drift rows.
     rubric_lane = (question.get("rubric_lane") or "numeric").lower()
     category = question.get("category")
-    if rubric_lane == "approval":
+    if rubric_lane == "numeric":
+        score = score_sql(duck, sql, expected_value)
+    elif rubric_lane == "approval":
         text_score = score_approval(question, gw.content or "")
         score = ScoreResult(
             status=text_score.status,
@@ -942,7 +944,10 @@ def _execute_one(
             detail="drift judge not yet calibrated; raw text persisted for offline labelling",
         )
     else:
-        score = score_sql(duck, sql, expected_value)
+        raise ValueError(
+            f"unknown rubric_lane {rubric_lane!r} on question {qid!r}; "
+            "expected one of: numeric, approval, drift"
+        )
 
     return CallResult(
         model=model_id, baseline=baseline, metric_key=metric_key,

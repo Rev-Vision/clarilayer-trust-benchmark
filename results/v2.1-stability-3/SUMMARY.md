@@ -117,7 +117,7 @@ All 61 PASS rows came from baseline E (ClariLayer); zero `flagged` outcomes were
 
 ## Anomalies
 
-- **ERROR rows: 16 (0.9%)** -- comparable to chunk 1's 1.0%. Top error fingerprints:
+- **ERROR rows: 16 (0.9%)** -- comparable to chunk 1's 0.8%. Top error fingerprints:
   - `CatalogException: Catalog Error: Table with name time_spine does not exist` x 6
   - `BinderException: Binder Error: column "total_customers" must appear in the GROUP BY` x 2
   - `BinderException: Binder Error: Referenced column "spend_date" not found in FROM` x 2

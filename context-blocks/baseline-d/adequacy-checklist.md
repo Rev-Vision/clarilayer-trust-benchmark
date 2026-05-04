@@ -6,7 +6,7 @@ official dbt-metricflow documentation (https://docs.getdbt.com/docs/build/about-
 The list below enumerates every MetricFlow primitive the synthetic SaaS
 warehouse exercises. Each line names the primitive, links the canonical
 docs anchor, and records whether the v2 baseline shipped under
-`benchmark/scripts/baselines/d_dbt.py` + the 20 generated YAMLs in this
+`harness/baselines/d_dbt.py` + the 20 generated YAMLs in this
 directory exercises it.
 
 Reviewers can grep `[ ]` for unfinished items; a clean checklist (all

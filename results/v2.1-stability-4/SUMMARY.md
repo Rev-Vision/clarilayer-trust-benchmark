@@ -117,7 +117,7 @@ All 60 PASS rows came from baseline E (ClariLayer); zero `flagged` outcomes were
 
 ## Anomalies
 
-- **ERROR rows: 19 (1.1%)** -- in line with chunk 1 (1.0%). Top error fingerprints (mostly DuckDB binder/catalog issues from baselines A-D):
+- **ERROR rows: 19 (1.1%)** -- in line with chunk 1 (0.8%). Top error fingerprints (mostly DuckDB binder/catalog issues from baselines A-D):
   - `CatalogException: Catalog Error: Table with name time_spine does not exist` x 6
   - `BinderException: Binder Error: Referenced column "spend_date" not found in FROM` x 2
   - `BinderException: Binder Error: column ... must appear in the GROUP BY clause` x 8 (singletons across columns)

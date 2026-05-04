@@ -312,7 +312,7 @@ python3 benchmark/scripts/harness.py --pilot \
     --config benchmark/scripts/run_config_full_stability_1.yaml \
     --run-id v2.1-stability-1
 python3 benchmark/scripts/resolve_deferred_drift.py \
-    --run-id v2.1-stability-1
+    --results benchmark/results/v2.1-stability-1/results.jsonl
 
 # V2.1-RR aggregates: read directly from each chunk's SUMMARY.md, or sum
 # from the raw JSONL (results/v2.1-stability-{1..5}/results.jsonl).

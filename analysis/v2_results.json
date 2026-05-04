@@ -689,7 +689,7 @@
   ],
   "v1_v2_crosswalk": {
     "status": "v1_results_jsonl_not_found",
-    "note": "v1 raw results.jsonl not present in the v2 worktree. Cited v1 numbers come from benchmark/publication/trust-benchmark-v1.md (run id v1-2026-04-27, dataset commit 5b6abec). v1 baseline d is the same product as v2 baseline e (ClariLayer governed); v1 baseline c is the v1 'Cube-style single non-governed measure', NOT the v2 expert-configured Cube baseline.",
+    "note": "v1 raw results.jsonl not present in the v2 worktree. Cited v1 numbers come from paper/trust-benchmark-v1.md (run id v1-2026-04-27, dataset commit 5b6abec). v1 baseline d is the same product as v2 baseline e (ClariLayer governed); v1 baseline c is the v1 'Cube-style single non-governed measure', NOT the v2 expert-configured Cube baseline.",
     "v1_published_per_baseline": {
       "a": {
         "accuracy_pct": 1.3,

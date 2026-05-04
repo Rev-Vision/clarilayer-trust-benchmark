@@ -117,7 +117,7 @@ Locked judge: `anthropic/claude-sonnet-4.5` @ T=0.0 with prompt at `benchmark/sc
 
 ## Anomalies
 
-- **ERROR rows: 14 (0.8%)** -- lower than chunk 5 v2's 19 (1.1%) and chunk 1's 18 (1.0%). Top error fingerprints:
+- **ERROR rows: 14 (0.8%)** -- lower than chunk 5 v2's 19 (1.1%) and chunk 1's 15 (0.8%). Top error fingerprints:
   - `CatalogException: Catalog Error: Table with name time_spine does not exist` x 6
   - `BinderException: Binder Error: column "total_customers" must appear in the GROUP BY...` x 3
   - `BinderException: Binder Error: column "total" must appear in the GROUP BY clause` x 2
