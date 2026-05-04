@@ -277,6 +277,10 @@ Same as v1 and v2.0. ClariLayer designed the warehouse, authored the questions, 
 
 The v2.0 → V2.1-RR aggregate lift on E (28.3% → 47.17%) is a union of (a) F2's directive-driven Drift lift, (b) F3's execution-metadata-driven Lookup lift, (c) F5's surface-pin-driven Versioning lift, (d) F6's reframe-driven Ambiguity lift, and (e) F4's modest Approval regression. We do not split the +18.87 pp aggregate into a single attributable cause beyond the per-category mechanical explanations in §Bug-fix attribution. v2.0's measurement was directionally correct; V2.1-RR's measurement reflects the post-F1–F7 product surface. The first-fire $138.60 sunk cost (F1-contract verbosity catch) is disclosed but does not enter the published numbers — only the clean V2.1-RR re-run does.
 
+### Baseline-D context blocks contained a phrasing leak (post-publication)
+
+After V2.1-RR results were finalized, post-publication review surfaced a phrasing leak in the Baseline-D (dbt MetricFlow) context-block YAMLs: the `is_test` dimension's `description` field read *"True for internal / QA accounts; governed metrics MUST exclude is_test = true."*, and a `total_mrr` measure description read *"…pair with a filter for governed views."* These phrasings used governance-directive language ("MUST exclude", "governed views") inside a non-governed baseline's context block. The B/L/D's published score of **1.39%** aggregate (the second-lowest among baselines, and statistically indistinguishable from the bare-schema A and the Cube C baselines on Drift / Versioning / Approval) does not suggest the leak materially helped Baseline D — but it is a methodology defect we want surfaced rather than buried. The generator (`benchmark/scripts/build_context_blocks.py`) and all 20 Baseline-D YAMLs were corrected in the post-publication errata pass; we did **not** re-run the V2.1-RR sweep with the cleaned YAMLs (the cost would be ~$303.50 / ~10.3 hours). The published numbers stand as-is with this disclosure attached.
+
 ---
 
 ## Reproducibility

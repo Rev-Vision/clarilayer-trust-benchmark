@@ -44,7 +44,7 @@ semantic_models:
   - name: is_test
     type: categorical
     expr: is_test
-    description: True for internal / QA accounts; governed metrics MUST exclude is_test = true.
+    description: True for internal / QA accounts that should be excluded from financial roll-ups.
   - name: signup_date
     type: time
     expr: signup_date
@@ -116,7 +116,8 @@ semantic_models:
   - name: total_mrr
     agg: sum
     expr: mrr
-    description: Unfiltered SUM(mrr); pair with a filter for governed views.
+    description: Unfiltered SUM(mrr); compose with a status / is_test filter at the metric layer when
+      scoping is required.
   - name: avg_mrr
     agg: average
     expr: mrr

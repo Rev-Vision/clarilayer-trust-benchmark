@@ -47,7 +47,7 @@ semantic_models:
   - name: is_test
     type: categorical
     expr: is_test
-    description: True for internal / QA accounts; governed metrics MUST exclude is_test = true.
+    description: True for internal / QA accounts that should be excluded from financial roll-ups.
   - name: signup_date
     type: time
     expr: signup_date
